@@ -1,0 +1,401 @@
+# Mistral Pipecat Voice Runtime Architecture
+
+This note documents the current Mistral voice-agent path after the WebRTC
+audio-jitter investigation and cleanup. The key decision is:
+
+```text
+  WebRTC remains the live input/control lane.
+  Audible agent speech is played from complete runtime-generated WAV files over HTTP.
+```
+
+## Current Mental Model
+
+```text
+                         LIVE INPUT / CONTROL LANE
+
+  Chrome microphone
+        |
+        | WebRTC media track
+        v
+  React usePipecatWebRTCSession
+        |
+        | SDP offer + mic stream + data channel
+        v
+  FastAPI voice runtime
+        |
+        v
+  Pipecat SmallWebRTCTransport
+        |
+        v
+  VAD -> turn-level STT -> LLM
+
+
+                         STABLE AGENT OUTPUT LANE
+
+  Mistral LLM text
+        |
+        v
+  BufferedMistralTTSService
+        |
+        | collect one TTS call into full PCM
+        v
+  /tmp/voice-runtime-audio/<session_id>/utterance-NNN-source-24k.wav
+        |
+        | tts_utterance_ready event over data channel
+        v
+  React fetches WAV over HTTP
+        |
+        v
+  HTMLAudioElement playback
+        |
+        v
+  Speakers
+```
+
+## End-to-End Flow
+
+```text
+  1. User starts a Mistral voice exam in React.
+
+     src/components/VoiceExam/VoiceInterface.tsx
+        |
+        | asks Django for a signed runtime URL/token
+        v
+
+  2. Django creates/records the voice session and returns runtime details.
+
+     backend/voice/services/providers.py
+     backend/voice/api/runtime_views.py
+        |
+        | session_id + signed token + WebRTC URL
+        v
+
+  3. React opens the browser microphone and creates a WebRTC connection.
+
+     src/hooks/usePipecatWebRTCSession.ts
+        |
+        | mic track + data channel
+        v
+
+  4. FastAPI accepts the WebRTC offer and starts the Pipecat task.
+
+     runtime/pipecat_app.py
+        |
+        | run_pipecat_webrtc_session(...)
+        v
+
+  5. Runtime fetches rich session context from Django.
+
+     runtime/session_context.py
+        |
+        | first message, system prompt, voice, eagerness, timeout
+        v
+
+  6. Pipecat receives mic audio and detects user turns.
+
+     runtime/pipecat_pipeline.py
+        |
+        | InputAudioRawFrame stream
+        v
+
+  7. Batch STT transcribes the completed spoken turn.
+
+     runtime/batch_stt.py
+        |
+        | POST /v1/audio/transcriptions
+        v
+
+  8. Mistral LLM generates examiner text.
+
+     runtime/pipecat_pipeline.py
+        |
+        | MistralLLMService
+        v
+
+  9. Buffered TTS renders each TTS call into complete audio.
+
+     runtime/tts_buffer.py
+        |
+        | BufferedMistralTTSService writes source WAV + transport-ready WAV
+        v
+
+ 10. Runtime sends a tiny data-channel event with the WAV filename.
+
+     {
+       "type": "tts_utterance_ready",
+       "sourceWavName": "utterance-005-source-24k.wav",
+       "webrtcWavName": "utterance-005-webrtc-48k.wav"
+     }
+        |
+        v
+
+ 11. React fetches the source WAV and queues playback.
+
+     src/hooks/usePipecatWebRTCSession.ts
+        |
+        | GET /sessions/<id>/utterances/<name>?token=<token>
+        v
+
+ 12. Browser plays the WAV through a normal HTMLAudioElement.
+```
+
+## Runtime Module Split
+
+The former 1,283-line `pipecat_pipeline.py` has been split into smaller runtime
+modules:
+
+```text
+  runtime/pipecat_pipeline.py
+      |
+      | orchestrates one session
+      |
+      +-- runtime/audio_constants.py
+      |      shared sample-rate constants
+      |
+      +-- runtime/vad.py
+      |      eagerness -> VAD analyzer configuration
+      |
+      +-- runtime/text_utils.py
+      |      system prompt, first-message resolution, TTS text normalization
+      |
+      +-- runtime/tts_buffer.py
+      |      full-utterance Mistral TTS buffering and WAV artifact writing
+      |
+      +-- runtime/processors.py
+      |      browser events, client controls, user transcripts, agent turns
+      |
+      +-- runtime/recorder.py
+      |      Django callback payloads, transcript capture, runtime metrics
+      |
+      +-- runtime/batch_stt.py
+             turn-level Mistral transcription
+```
+
+The pipeline file now owns session assembly only: create STT/LLM/TTS, wire the
+processors, start the opening message, and notify Django when the task ends.
+
+## Why WebRTC Is Still Present
+
+WebRTC is still useful for live input:
+
+```text
+  Browser mic
+    -> echo cancellation / noise suppression / auto gain control
+    -> low-latency media transport
+    -> Pipecat-compatible continuous audio frames
+    -> interruption/control signals over the data channel
+```
+
+WebRTC is no longer used as the audible agent output path. Generated TTS is an
+artifact, not live microphone media, so HTTP file playback is simpler and avoids
+Chrome NetEq / RTP timing artifacts.
+
+```text
+  Old audible output path:
+
+    Mistral TTS
+      -> Pipecat output
+      -> aiortc Opus/RTP
+      -> Chrome WebRTC jitter buffer
+      -> audible glitches
+
+  Current audible output path:
+
+    Mistral TTS
+      -> runtime WAV
+      -> HTTP fetch
+      -> HTMLAudioElement
+      -> clean playback
+```
+
+## What Counts As One Audio File
+
+One WAV file corresponds to one TTS call, not necessarily one full LLM answer.
+
+```text
+  LLM answer:
+    "Good start. You're describing how runtime scales with input size.
+     Can you give me a concrete example?"
+
+  Possible TTS calls:
+    utterance-002-source-24k.wav  -> "Good start."
+    utterance-003-source-24k.wav  -> "You're describing how runtime scales..."
+    utterance-004-source-24k.wav  -> "Can you give me a concrete example?"
+```
+
+The frontend queues these files and plays them sequentially.
+
+## Current STT Flow
+
+```text
+  WebRTC mic frames
+        |
+        v
+  Pipecat VAD detects speech start
+        |
+        v
+  MistralBatchSTT buffers PCM for the turn
+        |
+        v
+  Pipecat VAD detects speech stop
+        |
+        v
+  Runtime wraps buffered PCM as WAV
+        |
+        v
+  POST https://api.mistral.ai/v1/audio/transcriptions
+        |
+        v
+  Final transcript text enters Pipecat/LLM context
+```
+
+Important wording: this is turn-level transcription using Mistral's
+transcription endpoint. It is not realtime streaming STT, and it is not Mistral
+async Batch Inference. The remaining latency comes mainly from turn-end
+detection plus the STT/LLM/TTS requests.
+
+## Latency Tuning
+
+The exposed Mistral advanced settings are useful for V1 tuning:
+
+```text
+  voiceEagerness
+      controls how eagerly the runtime treats the user's turn as complete.
+
+  voiceTurnTimeoutSecs
+      controls how long the examiner waits before timeout/follow-up behavior.
+```
+
+Client framing:
+
+```text
+  If responses feel delayed after short answers, lower/eager turn settings can
+  make the agent respond sooner, with the tradeoff that it may occasionally
+  respond before the student is fully done thinking.
+
+  Once paid Mistral limits are available, benchmark realtime STT and/or higher
+  tier API limits against ElevenLabs using the same exam prompt and settings.
+```
+
+## Relevant Code Map
+
+Line counts captured on 2026-05-22 after the cleanup split.
+
+Runtime repo:
+
+```text
+  runtime/pipecat_pipeline.py                                250 lines
+      Session orchestration: build STT/LLM/TTS, wire processors/transports,
+      queue opening speech, and report final status.
+
+  runtime/tts_buffer.py                                      150 lines
+      BufferedMistralTTSService. Pre-renders each TTS call, writes WAV files,
+      emits tts_utterance_ready events.
+
+  runtime/text_utils.py                                      278 lines
+      Prompt construction, first-message resolution, English/Hindi detection,
+      TTS text cleanup and Devanagari transliteration helpers.
+
+  runtime/processors.py                                      263 lines
+      Browser data-channel events, client end/cancel handling, user transcript
+      capture, agent-turn coordination.
+
+  runtime/recorder.py                                        146 lines
+      Runtime transcript/metrics collection and Django completion callbacks.
+
+  runtime/pipecat_app.py                                     149 lines
+      FastAPI runtime entrypoint. WebRTC offer endpoint and token-gated
+      rendered-utterance HTTP endpoints.
+
+  runtime/batch_stt.py                                       137 lines
+      Turn-level Mistral STT processor. Buffers user PCM between VAD start/stop,
+      posts WAV to /v1/audio/transcriptions, emits TranscriptionFrame.
+
+  runtime/settings.py                                         87 lines
+      Runtime env config: Mistral models, CORS, VAD, URLs.
+
+  runtime/session_context.py                                  73 lines
+      Server-to-server fetch of rich agent/session config from Django.
+
+  runtime/session_tokens.py                                   66 lines
+      Signed runtime token validation and tiny auth/session claims.
+
+  runtime/vad.py                                              35 lines
+      Eagerness mapping and VAD analyzer construction.
+
+  runtime/audio_constants.py                                   5 lines
+      Shared browser-input, Mistral-output, and agent-output sample rates.
+```
+
+Socratic Bots backend integration:
+
+```text
+  backend/voice/api/runtime_views.py                         134 lines
+      Django runtime callbacks and session-context endpoint.
+
+  backend/voice/api/serializers.py                           328 lines
+      Voice API serializers, including Mistral advanced settings.
+
+  backend/voice/api/urls.py                                   42 lines
+      Voice API route registration.
+
+  backend/voice/api/voice_catalog_views.py                    85 lines
+      Server-proxied, cached Mistral voice catalog.
+
+  backend/voice/models.py                                    394 lines
+      Voice models, including Mistral provider fields and advanced settings.
+
+  backend/voice/services/providers.py                        234 lines
+      Provider-specific session startup logic.
+```
+
+Socratic Bots frontend integration:
+
+```text
+  src/hooks/usePipecatWebRTCSession.ts                       379 lines
+      WebRTC session hook. Opens mic, negotiates WebRTC, receives
+      tts_utterance_ready events, fetches/queues WAV playback through
+      HTMLAudioElement.
+
+  src/components/VoiceExam/VoiceInterface.tsx                582 lines
+      Exam UI. Starts/ends sessions, renders transcript/status, wires Mistral
+      runtime hook into the exam screen.
+
+  src/types/pipecat.ts                                        33 lines
+      Data-channel message typing for Pipecat/runtime events.
+
+  src/types/voiceAgent.ts                                    358 lines
+      Voice-agent domain types, including Mistral voice/eagerness fields.
+
+  src/services/voiceAgent.service.ts                         254 lines
+      API client methods, including Mistral voice catalog fetch.
+
+  src/stores/forms/voiceAgentFormStore.ts                    356 lines
+      Voice-agent create/edit form state, including Mistral advanced settings.
+
+  src/components/voice-agents/sections/MistralAdvancedSection.tsx 155 lines
+      UI controls for Mistral eagerness/turn-timeout style settings.
+
+  src/hooks/queries/useMistralVoices.ts                        31 lines
+      React Query wrapper for the Mistral voice catalog endpoint.
+```
+
+## Quality Verdict
+
+The audio-output quality blocker is resolved by moving audible TTS playback to
+HTTP WAVs. The remaining V1 risks are not audio fidelity problems:
+
+```text
+  1. STT accuracy on short/technical phrases.
+  2. Turn-end latency on short answers.
+  3. Mistral free-tier rate limits during repeated testing.
+```
+
+The current system is a strong V1 architecture:
+
+```text
+  Keep WebRTC for mic/control.
+  Keep Pipecat for orchestration.
+  Keep Mistral for STT/LLM/TTS.
+  Play generated agent speech through HTTP WAVs.
+```

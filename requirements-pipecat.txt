@@ -1,0 +1,2 @@
+# Install with --no-deps after requirements.txt.
+pipecat-ai==1.2.1
