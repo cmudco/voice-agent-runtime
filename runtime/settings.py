@@ -48,7 +48,7 @@ def get_settings() -> RuntimeSettings:
         mistral_llm_max_tokens=int(os.environ.get("MISTRAL_LLM_MAX_TOKENS", "180")),
         mistral_stt_model=os.environ.get(
             "MISTRAL_STT_MODEL",
-            "voxtral-mini-transcribe-realtime-2602",
+            "voxtral-mini-latest",
         ),
         mistral_stt_target_delay_ms=int(
             os.environ.get("MISTRAL_STT_TARGET_DELAY_MS", "600")

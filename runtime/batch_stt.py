@@ -123,6 +123,12 @@ class MistralBatchSTT(FrameProcessor):
                 files=files,
                 headers=headers,
             )
+            if response.is_error:
+                logger.warning(
+                    "Mistral batch STT HTTP {}: {}",
+                    response.status_code,
+                    response.text[:500],
+                )
             response.raise_for_status()
         return response.json().get("text", "")
 
