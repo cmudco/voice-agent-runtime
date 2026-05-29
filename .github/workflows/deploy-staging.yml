@@ -1,0 +1,35 @@
+name: Deploy Voice Agent Runtime to Staging
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Deploy to Staging via SSH
+        env:
+          SSH_PASSWORD: ${{ secrets.STAGING_SSH_PASSWORD }}
+          SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          SSH_HOST: ${{ secrets.STAGING_SSH_HOST }}
+        run: |
+          sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" << 'EOF'
+            set -e
+            echo "Connected to staging server"
+
+            echo "Running deploy.sh..."
+            cd /home/deployer/voice-agent-service
+            ./deploy.sh
+
+            echo "Staging deployment finished."
+          EOF
+
+      - name: Handle deployment failure
+        if: ${{ failure() }}
+        run: echo "Staging deployment failed. Please check the logs for more information."
