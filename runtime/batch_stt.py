@@ -29,6 +29,8 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     StartFrame,
     TranscriptionFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -74,6 +76,13 @@ class MistralBatchSTT(FrameProcessor):
         elif isinstance(frame, VADUserStartedSpeakingFrame):
             self._buffer = bytearray()
             self._speaking = True
+            # The user-context aggregator runs ExternalUserTurnStrategies, so
+            # this processor owns the user-speaking signals. Open the turn now
+            # and interrupt any in-progress agent speech (barge-in) — this
+            # replaces the interruption the default VAD start strategy used to
+            # emit before we moved to external turn control.
+            await self.broadcast_interruption()
+            await self.push_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
 
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
             audio = bytes(self._buffer)
@@ -81,6 +90,11 @@ class MistralBatchSTT(FrameProcessor):
             self._speaking = False
             if len(audio) >= _MIN_SPEECH_BYTES:
                 self.create_task(self._transcribe_and_emit(audio), name="batch_stt_post")
+            # Note: the turn is *not* closed here. UserStoppedSpeakingFrame is
+            # emitted only after the transcript is pushed (see
+            # _transcribe_and_emit), so the aggregator never finalizes an empty
+            # turn. Too-short/failed utterances simply leave the turn open for
+            # the user to continue.
 
         elif isinstance(frame, InputAudioRawFrame) and self._speaking:
             self._buffer.extend(frame.audio)
@@ -108,6 +122,12 @@ class MistralBatchSTT(FrameProcessor):
             ),
             FrameDirection.DOWNSTREAM,
         )
+        # Close the user turn only now that the transcript is downstream.
+        # ExternalUserTurnStopStrategy finalizes on UserStoppedSpeakingFrame and
+        # requires the transcript to already be aggregated, so emitting it here
+        # (rather than at VAD stop) is what makes turn finalization race-free
+        # with the asynchronous batch transcription.
+        await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
 
     async def _post_mistral(self, pcm: bytes) -> str:
         wav = _pcm_to_wav(pcm, self._sample_rate)

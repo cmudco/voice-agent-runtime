@@ -208,14 +208,12 @@ class UserTranscriptProcessor(FrameProcessor):
     def __init__(self, recorder: SessionRecorder):
         super().__init__()
         self._recorder = recorder
-        self._user_parts: list[str] = []
 
-    async def _flush_user_transcript(self) -> None:
-        text = _normalize_transcript_text(self._user_parts)
-        self._user_parts = []
-        if not text:
+    async def _emit_user_transcript(self, text: str) -> None:
+        normalized = _normalize_transcript_text([text])
+        if not normalized:
             return
-        entry = self._recorder.add_transcript("user", text)
+        entry = self._recorder.add_transcript("user", normalized)
         await self.push_frame(
             OutputTransportMessageUrgentFrame(
                 message={
@@ -232,15 +230,17 @@ class UserTranscriptProcessor(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
+        # Emit on the TranscriptionFrame itself, NOT on UserStoppedSpeakingFrame.
+        # The batch STT delivers one final transcript per utterance, and the stop
+        # frame is a SystemFrame that is dispatched out-of-band - it overtakes the
+        # queued (DataFrame) transcript, so flushing on it would fire before the
+        # text arrives and emit nothing. The transcript frame carries the text in
+        # order, so recording/emitting here is race-free.
         if isinstance(frame, TranscriptionFrame):
             text = _clean_transcript_text(frame.text or "")
             if text:
-                self._user_parts.append(text)
                 frame = replace(frame, text=text)
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            await self._flush_user_transcript()
-        elif isinstance(frame, InterruptionFrame):
-            self._user_parts = []
+                await self._emit_user_transcript(text)
 
         await self.push_frame(frame, direction)
 
