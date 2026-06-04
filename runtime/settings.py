@@ -33,6 +33,38 @@ class RuntimeSettings:
     log_tts_request_text: bool
 
 
+# Origins that must always be allowed, regardless of deployment env config.
+# These are the Socratic Books frontends that embed the voice runtime; baking
+# them in keeps CORS working even if a deployment forgets to set (or sets an
+# incomplete) VOICE_RUNTIME_CORS_ORIGINS. Local Vite ports are included for dev.
+_ALWAYS_ALLOWED_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "https://socraticbots-dev.hss.cmu.edu",
+    "https://socraticbots.hss.cmu.edu",
+]
+
+
+def _resolve_cors_origins() -> list[str]:
+    """Merge the env-provided CORS origins with the always-allowed defaults.
+
+    Order is preserved and duplicates are dropped so the runtime always accepts
+    the Socratic Books frontends without requiring perfect env configuration.
+    """
+    env_origins = [
+        origin.strip()
+        for origin in os.environ.get("VOICE_RUNTIME_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    resolved: list[str] = []
+    for origin in [*_ALWAYS_ALLOWED_CORS_ORIGINS, *env_origins]:
+        if origin not in resolved:
+            resolved.append(origin)
+    return resolved
+
+
 def get_settings() -> RuntimeSettings:
     internal_key = os.environ.get("DARE_INTERNAL_KEY", "")
     return RuntimeSettings(
@@ -67,16 +99,7 @@ def get_settings() -> RuntimeSettings:
             ).split(",")
             if server.strip()
         ],
-        voice_runtime_cors_origins=[
-            origin.strip()
-            for origin in os.environ.get(
-                "VOICE_RUNTIME_CORS_ORIGINS",
-                # Default includes both common Vite ports on localhost and 127.0.0.1.
-                "http://localhost:5173,http://127.0.0.1:5173,"
-                "http://localhost:5174,http://127.0.0.1:5174",
-            ).split(",")
-            if origin.strip()
-        ],
+        voice_runtime_cors_origins=_resolve_cors_origins(),
         log_tts_request_text=os.environ.get(
             "VOICE_RUNTIME_LOG_TTS_REQUEST_TEXT",
             "false",
