@@ -20,8 +20,11 @@ class SessionRecorder:
     work unchanged.
     """
 
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, backend_url: str):
         self.session_id = session_id
+        # The backend that owns this session (resolved when its context was
+        # fetched). All callbacks for this session go back to this same backend.
+        self.backend_url = backend_url.rstrip("/")
         self._started_at = time.monotonic()
         self.transcript: list[dict] = []
         self.metrics: dict = {
@@ -73,10 +76,7 @@ class SessionRecorder:
         if self._started_notified:
             return
 
-        callback_url = (
-            f"{settings.socratic_bots_backend_url.rstrip('/')}"
-            "/api/voice/runtime/conversation-started/"
-        )
+        callback_url = f"{self.backend_url}/api/voice/runtime/conversation-started/"
         headers = {"X-Internal-Key": settings.dare_internal_key}
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -115,10 +115,7 @@ class SessionRecorder:
             return
         self._notified = True
 
-        callback_url = (
-            f"{settings.socratic_bots_backend_url.rstrip('/')}"
-            "/api/voice/runtime/conversation-ended/"
-        )
+        callback_url = f"{self.backend_url}/api/voice/runtime/conversation-ended/"
         payload = {
             "sessionId": self.session_id,
             "status": status,

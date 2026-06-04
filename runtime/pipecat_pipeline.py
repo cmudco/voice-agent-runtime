@@ -54,7 +54,7 @@ async def _run_transport_session(
     context: "SessionContext",
 ) -> None:
     """Build and run the Pipecat WebRTC pipeline for one browser session."""
-    recorder = SessionRecorder(claims.session_id)
+    recorder = SessionRecorder(claims.session_id, context.backend_url)
     logger.info(
         (
             "Pipecat WebRTC session {} starting with stt_target_delay_ms={}, "

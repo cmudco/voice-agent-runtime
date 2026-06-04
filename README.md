@@ -16,7 +16,7 @@ Copy `.env.example` to `.env` and fill the secrets.
 
 ```bash
 MISTRAL_API_KEY=...
-SOCRATIC_BOTS_BACKEND_URL=http://localhost:8001
+SOCRATIC_BOTS_BACKEND_URLS=http://localhost:8001
 DARE_INTERNAL_KEY=...
 VOICE_RUNTIME_SESSION_SECRET=
 VOICE_RUNTIME_ICE_SERVERS=stun:stun.l.google.com:19302
@@ -71,10 +71,21 @@ Health check: `GET /health`.
 For Socratic staging, the expected shape is:
 
 ```bash
-SOCRATIC_BOTS_BACKEND_URL=https://socraticbots-dev-api.hss.cmu.edu
+SOCRATIC_BOTS_BACKEND_URLS=https://socraticbots-dev-api.hss.cmu.edu
 VOICE_RUNTIME_CORS_ORIGINS=https://socraticbots-dev.hss.cmu.edu
 DARE_INTERNAL_KEY=<same value as Django>
 VOICE_RUNTIME_SESSION_SECRET=
+```
+
+A single runtime can serve several environments at once — list every backend in
+`SOCRATIC_BOTS_BACKEND_URLS` (comma-separated) and every frontend in
+`VOICE_RUNTIME_CORS_ORIGINS`. Each session is routed to whichever backend owns
+it, so the backends must share the same `DARE_INTERNAL_KEY` and
+`VOICE_RUNTIME_SESSION_SECRET`:
+
+```bash
+SOCRATIC_BOTS_BACKEND_URLS=https://socraticbots-dev-api.hss.cmu.edu,https://socraticbots-api.hss.cmu.edu
+VOICE_RUNTIME_CORS_ORIGINS=https://socraticbots-dev.hss.cmu.edu,https://socraticbots.hss.cmu.edu
 ```
 
 The Django backend must set:

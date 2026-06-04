@@ -15,7 +15,7 @@ load_dotenv(RUNTIME_DIR / ".env")
 @dataclass(frozen=True)
 class RuntimeSettings:
     mistral_api_key: str
-    socratic_bots_backend_url: str
+    socratic_bots_backend_urls: list[str]
     dare_internal_key: str
     voice_runtime_session_secret: str
     mistral_llm_model: str
@@ -47,6 +47,27 @@ _ALWAYS_ALLOWED_CORS_ORIGINS = [
 ]
 
 
+def _resolve_backend_urls() -> list[str]:
+    """Resolve the Socratic Books backend URLs the runtime can talk to.
+
+    A single runtime instance serves more than one environment (e.g. staging
+    and prod), so ``SOCRATIC_BOTS_BACKEND_URLS`` accepts a comma-separated list.
+    The legacy singular ``SOCRATIC_BOTS_BACKEND_URL`` is still honored as a
+    fallback so existing deployments keep working. Each browser session belongs
+    to exactly one backend; the runtime discovers which by probing these URLs in
+    order for the session context (see ``fetch_session_context``).
+    """
+    raw = os.environ.get("SOCRATIC_BOTS_BACKEND_URLS") or os.environ.get(
+        "SOCRATIC_BOTS_BACKEND_URL", "http://localhost:8001"
+    )
+    urls: list[str] = []
+    for url in raw.split(","):
+        cleaned = url.strip().rstrip("/")
+        if cleaned and cleaned not in urls:
+            urls.append(cleaned)
+    return urls
+
+
 def _resolve_cors_origins() -> list[str]:
     """Merge the env-provided CORS origins with the always-allowed defaults.
 
@@ -69,10 +90,7 @@ def get_settings() -> RuntimeSettings:
     internal_key = os.environ.get("DARE_INTERNAL_KEY", "")
     return RuntimeSettings(
         mistral_api_key=os.environ.get("MISTRAL_API_KEY", ""),
-        socratic_bots_backend_url=os.environ.get(
-            "SOCRATIC_BOTS_BACKEND_URL",
-            "http://localhost:8001",
-        ),
+        socratic_bots_backend_urls=_resolve_backend_urls(),
         dare_internal_key=internal_key,
         voice_runtime_session_secret=os.environ.get("VOICE_RUNTIME_SESSION_SECRET")
         or internal_key,

@@ -29,6 +29,10 @@ class SessionContext:
     voice_id: str = ""
     eagerness: str = "normal"
     turn_timeout_secs: int = 7
+    # The backend that owns this session. Resolved by probing the configured
+    # backends (staging/prod share one runtime) so the later conversation
+    # callbacks are sent back to the same backend that served the context.
+    backend_url: str = ""
 
     @classmethod
     def empty(cls) -> "SessionContext":
@@ -39,28 +43,7 @@ class SessionContextError(Exception):
     """Raised when the runtime cannot fetch session context from Django."""
 
 
-async def fetch_session_context(session_id: str) -> SessionContext:
-    """Fetch the rich session config from Django.
-
-    Returns a populated :class:`SessionContext` on success. Raises
-    :class:`SessionContextError` on a network or auth failure so the WebRTC
-    offer handler can reject the session cleanly rather than crashing
-    mid-pipeline.
-    """
-    url = (
-        f"{settings.socratic_bots_backend_url.rstrip('/')}"
-        f"/api/voice/runtime/sessions/{session_id}/context/"
-    )
-    headers = {"X-Internal-Key": settings.dare_internal_key}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.warning("Failed to fetch session context for {}: {}", session_id, exc)
-        raise SessionContextError(str(exc)) from exc
-
-    data = response.json()
+def _build_context(data: dict, backend_url: str) -> SessionContext:
     return SessionContext(
         first_message=data.get("first_message") or "",
         system_prompt=data.get("system_prompt") or "",
@@ -70,4 +53,64 @@ async def fetch_session_context(session_id: str) -> SessionContext:
         voice_id=data.get("voice_id") or "",
         eagerness=data.get("eagerness") or "normal",
         turn_timeout_secs=int(data.get("turn_timeout_secs", 7)),
+        backend_url=backend_url,
     )
+
+
+async def fetch_session_context(session_id: str) -> SessionContext:
+    """Fetch the rich session config from the backend that owns the session.
+
+    A single runtime serves multiple backends (staging/prod), so we probe each
+    configured ``SOCRATIC_BOTS_BACKEND_URLS`` entry in order. A backend that
+    doesn't recognize the session returns 404, so we move on; the first backend
+    that returns the context owns the session, and its URL is recorded on the
+    returned :class:`SessionContext` for the later callbacks.
+
+    Raises :class:`SessionContextError` if no backend served the context so the
+    WebRTC offer handler can reject the session cleanly rather than crashing
+    mid-pipeline.
+    """
+    headers = {"X-Internal-Key": settings.dare_internal_key}
+    backend_urls = settings.socratic_bots_backend_urls
+    last_error: str = "no backends configured"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for backend_url in backend_urls:
+            url = f"{backend_url}/api/voice/runtime/sessions/{session_id}/context/"
+            try:
+                response = await client.get(url, headers=headers)
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Session context request to {} failed for {}: {}",
+                    backend_url,
+                    session_id,
+                    exc,
+                )
+                continue
+
+            # 404 means this backend doesn't own the session — try the next one.
+            if response.status_code == 404:
+                last_error = f"{backend_url} returned 404"
+                continue
+            try:
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Session context lookup at {} errored for {}: {}",
+                    backend_url,
+                    session_id,
+                    exc,
+                )
+                continue
+
+            return _build_context(response.json(), backend_url)
+
+    logger.warning(
+        "No backend served session context for {} (tried {}): {}",
+        session_id,
+        backend_urls,
+        last_error,
+    )
+    raise SessionContextError(last_error)
