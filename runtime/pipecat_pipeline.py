@@ -11,6 +11,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from pipecat.observers.startup_timing_observer import StartupTimingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.services.mistral.llm import MistralLLMService
@@ -113,6 +114,14 @@ async def _run_transport_session(
             vad_analyzer=_build_vad_analyzer(context.eagerness),
             # "Turn Timeout" — how long of silence before the agent prompts.
             user_idle_timeout=float(context.turn_timeout_secs),
+            # Batch STT delivers the transcript asynchronously, *after* the VAD
+            # stop. The default stop strategy (Smart Turn) finalizes the turn on
+            # audio timing alone, so it can race ahead of the transcript and
+            # flush an empty user message — the agent then stays silent until the
+            # next utterance. External strategies hand turn boundaries to
+            # MistralBatchSTT, which closes the turn only once the transcript is
+            # in flight (see batch_stt.py), making finalization race-free.
+            user_turn_strategies=ExternalUserTurnStrategies(),
         ),
     )
 
