@@ -43,12 +43,19 @@ class SessionContextError(Exception):
     """Raised when the runtime cannot fetch session context from Django."""
 
 
+# Above ~1.0 the LLM starts emitting unstable tokens that the TTS then tries to
+# voice, which QA saw as brief bursts of gibberish/other-language speech at the
+# start of turns (they were running temperature=1.4). Clamp defensively so a
+# misconfigured agent can't destabilize a live exam; anything <=1.0 is untouched.
+_MAX_EXAM_TEMPERATURE = 1.0
+
+
 def _build_context(data: dict, backend_url: str) -> SessionContext:
     return SessionContext(
         first_message=data.get("first_message") or "",
         system_prompt=data.get("system_prompt") or "",
         exam_instructions=data.get("exam_instructions") or "",
-        temperature=float(data.get("temperature", 0.7)),
+        temperature=min(float(data.get("temperature", 0.7)), _MAX_EXAM_TEMPERATURE),
         language=data.get("language") or "en",
         voice_id=data.get("voice_id") or "",
         eagerness=data.get("eagerness") or "normal",

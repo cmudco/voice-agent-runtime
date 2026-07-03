@@ -105,10 +105,16 @@ def get_settings() -> RuntimeSettings:
         ),
         mistral_tts_model=os.environ.get("MISTRAL_TTS_MODEL", "voxtral-mini-tts-2603"),
         mistral_tts_voice=os.environ.get("MISTRAL_TTS_VOICE", "en_paul_neutral"),
-        vad_confidence=float(os.environ.get("VOICE_RUNTIME_VAD_CONFIDENCE", "0.7")),
+        # confidence + min_volume were 0.7 / 0.6 — too strict, which forced
+        # students to speak loudly and close to the mic (QA finding). Silero's
+        # min_volume is a raw energy gate applied ON TOP of the model, so it was
+        # the main culprit for dropping soft speech and feeding the STT clipped
+        # fragments (a source of "Yes, I'm ready" -> "Thank you"-style errors).
+        # Lowered to catch normal conversational voice at a normal distance.
+        vad_confidence=float(os.environ.get("VOICE_RUNTIME_VAD_CONFIDENCE", "0.5")),
         vad_start_secs=float(os.environ.get("VOICE_RUNTIME_VAD_START_SECS", "0.2")),
         vad_stop_secs=float(os.environ.get("VOICE_RUNTIME_VAD_STOP_SECS", "1.2")),
-        vad_min_volume=float(os.environ.get("VOICE_RUNTIME_VAD_MIN_VOLUME", "0.6")),
+        vad_min_volume=float(os.environ.get("VOICE_RUNTIME_VAD_MIN_VOLUME", "0.35")),
         voice_runtime_ice_servers=[
             server.strip()
             for server in os.environ.get(
