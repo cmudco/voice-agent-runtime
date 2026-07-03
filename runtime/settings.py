@@ -24,6 +24,14 @@ class RuntimeSettings:
     mistral_stt_target_delay_ms: int
     mistral_tts_model: str
     mistral_tts_voice: str
+    # "mistral" (Voxtral TTS, current default) or "kokoro" (local, English-pinned,
+    # ~3x-realtime — kills the wrong-language artifacts and shortens the
+    # per-sentence pause). Kokoro reuses the same WAV-playback path, so switching
+    # needs no frontend change; flip VOICE_RUNTIME_TTS_PROVIDER=kokoro to test.
+    tts_provider: str
+    kokoro_voice: str
+    kokoro_model_path: str
+    kokoro_voices_path: str
     vad_confidence: float
     vad_start_secs: float
     vad_stop_secs: float
@@ -105,6 +113,11 @@ def get_settings() -> RuntimeSettings:
         ),
         mistral_tts_model=os.environ.get("MISTRAL_TTS_MODEL", "voxtral-mini-tts-2603"),
         mistral_tts_voice=os.environ.get("MISTRAL_TTS_VOICE", "en_paul_neutral"),
+        tts_provider=os.environ.get("VOICE_RUNTIME_TTS_PROVIDER", "mistral").lower(),
+        kokoro_voice=os.environ.get("KOKORO_VOICE", "af_heart"),
+        # Empty -> Kokoro auto-downloads its ONNX model/voices on first use.
+        kokoro_model_path=os.environ.get("KOKORO_MODEL_PATH", ""),
+        kokoro_voices_path=os.environ.get("KOKORO_VOICES_PATH", ""),
         # confidence + min_volume were 0.7 / 0.6 — too strict, which forced
         # students to speak loudly and close to the mic (QA finding). Silero's
         # min_volume is a raw energy gate applied ON TOP of the model, so it was

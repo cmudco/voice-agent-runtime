@@ -14,14 +14,17 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from pipecat.observers.startup_timing_observer import StartupTimingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
+from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.services.mistral.llm import MistralLLMService
 from pipecat.services.mistral.tts import MistralTTSService
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 from runtime.audio_constants import (
     AGENT_OUTPUT_SAMPLE_RATE,
     BROWSER_INPUT_SAMPLE_RATE,
+    KOKORO_TTS_SAMPLE_RATE,
     MISTRAL_TTS_SAMPLE_RATE,
 )
 from runtime.batch_stt import MistralBatchSTT
@@ -42,7 +45,7 @@ from runtime.text_utils import (
     _normalize_tts_text,
     _resolve_first_message,
 )
-from runtime.tts_buffer import BufferedMistralTTSService
+from runtime.tts_buffer import BufferedKokoroTTSService, BufferedMistralTTSService
 from runtime.vad import _build_vad_analyzer
 
 
@@ -77,19 +80,39 @@ async def _run_transport_session(
         language="en" if _is_english_session(context.language) else None,
         sample_rate=BROWSER_INPUT_SAMPLE_RATE,
     )
-    tts = BufferedMistralTTSService(
-        api_key=settings.mistral_api_key,
-        sample_rate=MISTRAL_TTS_SAMPLE_RATE,
-        text_transforms=[("*", _normalize_tts_text)],
-        settings=MistralTTSService.Settings(
-            model=settings.mistral_tts_model,
-            # Per-agent voice if set; otherwise the env default.
-            voice=context.voice_id or settings.mistral_tts_voice,
-        ),
-        output_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
-        # Enables stable HTTP playback of pre-rendered agent utterances.
-        session_id=claims.session_id,
-    )
+    # TTS engine is selectable via VOICE_RUNTIME_TTS_PROVIDER. Both engines feed
+    # the same buffered WAV-playback path (see tts_buffer._BufferedTTSMixin), so
+    # switching needs no frontend change. Kokoro is local, English-pinned (no
+    # wrong-language artifacts) and renders ~3x realtime, so it shortens the
+    # per-utterance pause vs. Mistral's Voxtral TTS.
+    if settings.tts_provider == "kokoro":
+        tts = BufferedKokoroTTSService(
+            sample_rate=KOKORO_TTS_SAMPLE_RATE,
+            text_transforms=[("*", _normalize_tts_text)],
+            settings=KokoroTTSService.Settings(
+                voice=settings.kokoro_voice,
+                language=Language.EN,
+            ),
+            # Point at pre-fetched model files if configured; else auto-download.
+            model_path=settings.kokoro_model_path or None,
+            voices_path=settings.kokoro_voices_path or None,
+            output_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
+            session_id=claims.session_id,
+        )
+    else:
+        tts = BufferedMistralTTSService(
+            api_key=settings.mistral_api_key,
+            sample_rate=MISTRAL_TTS_SAMPLE_RATE,
+            text_transforms=[("*", _normalize_tts_text)],
+            settings=MistralTTSService.Settings(
+                model=settings.mistral_tts_model,
+                # Per-agent voice if set; otherwise the env default.
+                voice=context.voice_id or settings.mistral_tts_voice,
+            ),
+            output_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
+            # Enables stable HTTP playback of pre-rendered agent utterances.
+            session_id=claims.session_id,
+        )
     llm = MistralLLMService(
         api_key=settings.mistral_api_key,
         settings=MistralLLMService.Settings(
