@@ -62,7 +62,8 @@ async def _run_transport_session(
         (
             "Pipecat WebRTC session {} starting with stt_target_delay_ms={}, "
             "vad_stop_secs={}, vad_start_secs={}, vad_confidence={}, vad_min_volume={}, "
-            "stt_model={}, llm_model={}, tts_provider={}, tts_transport={}, kokoro_voice={}"
+            "user_turn_stop_timeout={}, stt_model={}, llm_model={}, tts_provider={}, "
+            "tts_transport={}, kokoro_voice={}"
         ),
         claims.session_id,
         settings.mistral_stt_target_delay_ms,
@@ -70,6 +71,7 @@ async def _run_transport_session(
         settings.vad_start_secs,
         settings.vad_confidence,
         settings.vad_min_volume,
+        settings.user_turn_stop_timeout,
         settings.mistral_stt_model,
         settings.mistral_llm_model,
         settings.tts_provider,
@@ -172,6 +174,10 @@ async def _run_transport_session(
         llm_context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=_build_vad_analyzer(context.eagerness),
+            # Fallback cap for semantic-turn misses. Without this, Pipecat's
+            # default 5s wait can leave the browser in a misleading "listening"
+            # state after the student has clearly stopped talking.
+            user_turn_stop_timeout=settings.user_turn_stop_timeout,
             # "Turn Timeout" — how long of silence before the agent prompts.
             user_idle_timeout=float(context.turn_timeout_secs),
         ),

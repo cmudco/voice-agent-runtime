@@ -32,10 +32,15 @@ VOICE_RUNTIME_VAD_CONFIDENCE=0.7
 VOICE_RUNTIME_VAD_START_SECS=0.2
 VOICE_RUNTIME_VAD_STOP_SECS=1.2
 VOICE_RUNTIME_VAD_MIN_VOLUME=0.6
+VOICE_RUNTIME_USER_TURN_STOP_TIMEOUT=2.0
 ```
 
 For production WebRTC across NAT/firewalls, configure proper STUN/TURN
 infrastructure through `VOICE_RUNTIME_ICE_SERVERS`.
+
+`VOICE_RUNTIME_USER_TURN_STOP_TIMEOUT` caps Pipecat's semantic turn detector
+fallback wait. Lower values feel snappier after a student stops talking; higher
+values are more patient with long thinking pauses.
 
 For V1, `DARE_INTERNAL_KEY` is intentionally reused as the shared
 internal-service secret between Django and this runtime. `VOICE_RUNTIME_SESSION_SECRET`

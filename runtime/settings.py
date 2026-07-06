@@ -43,6 +43,7 @@ class RuntimeSettings:
     vad_start_secs: float
     vad_stop_secs: float
     vad_min_volume: float
+    user_turn_stop_timeout: float
     voice_runtime_ice_servers: list[str]
     voice_runtime_cors_origins: list[str]
     log_tts_request_text: bool
@@ -136,6 +137,12 @@ def get_settings() -> RuntimeSettings:
         vad_start_secs=float(os.environ.get("VOICE_RUNTIME_VAD_START_SECS", "0.2")),
         vad_stop_secs=float(os.environ.get("VOICE_RUNTIME_VAD_STOP_SECS", "1.2")),
         vad_min_volume=float(os.environ.get("VOICE_RUNTIME_VAD_MIN_VOLUME", "0.35")),
+        # Pipecat's semantic turn detector is intentionally patient by default
+        # (5s). Keep VAD stable for natural pauses, but cap the fallback wait so
+        # a missed "done speaking" signal does not leave the UI blinking/listening.
+        user_turn_stop_timeout=float(
+            os.environ.get("VOICE_RUNTIME_USER_TURN_STOP_TIMEOUT", "2.0")
+        ),
         voice_runtime_ice_servers=[
             server.strip()
             for server in os.environ.get(
