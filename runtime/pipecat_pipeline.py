@@ -102,11 +102,14 @@ async def _run_transport_session(
         claims.session_id,
         "en" if _is_english_session(context.language) else "auto",
     )
-    # TTS engine is selectable via VOICE_RUNTIME_TTS_PROVIDER. Both engines feed
-    # the same buffered WAV-playback path (see tts_buffer._BufferedTTSMixin), so
-    # switching needs no frontend change. Kokoro is local, English-pinned (no
-    # wrong-language artifacts) and renders ~3x realtime, so it shortens the
-    # per-utterance pause vs. Mistral's Voxtral TTS.
+    # TTS engine (VOICE_RUNTIME_TTS_PROVIDER) and transport
+    # (VOICE_RUNTIME_TTS_TRANSPORT) select one of three paths:
+    #   kokoro + webrtc — streaming over the WebRTC track (tested production
+    #     configuration; in-sync with transcript events, no buffering pause)
+    #   kokoro + http   — buffered WAVs over HTTP (fallback)
+    #   mistral + http  — buffered Voxtral TTS WAVs over HTTP (fallback; Mistral's
+    #     irregular streaming cadence rules out sending it over WebRTC directly)
+    # The browser learns the active transport from the runtime_ready message.
     if settings.tts_provider == "kokoro" and settings.tts_transport == "webrtc":
         # Streaming path: plain KokoroTTSService emits audio frames straight to
         # transport.output() (WebRTC), interleaved in-order with the transcript
@@ -198,25 +201,27 @@ async def _run_transport_session(
 
     user_transcript = UserTranscriptProcessor(recorder)
     client_control = ClientControlProcessor(recorder)
-    llm_input_debug = LLMInputDebugProcessor(claims.session_id)
     agent_turns = AgentTurnCoordinator()
     browser_events = BrowserEventProcessor(recorder, agent_turns)
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            client_control,
-            stt,
-            user_transcript,
-            aggregators.user(),
-            llm_input_debug,
-            llm,
-            tts,
-            browser_events,
-            transport.output(),
-            aggregators.assistant(),
-        ]
-    )
+    stages = [
+        transport.input(),
+        client_control,
+        stt,
+        user_transcript,
+        aggregators.user(),
+        llm,
+        tts,
+        browser_events,
+        transport.output(),
+        aggregators.assistant(),
+    ]
+    if settings.llm_input_debug:
+        # Debug-only tap that dumps every LLM request context to /tmp; gated
+        # because the dumps contain student answers.
+        stages.insert(stages.index(llm), LLMInputDebugProcessor(claims.session_id))
+
+    pipeline = Pipeline(stages)
 
     startup_observer = StartupTimingObserver()
     latency_observer = UserBotLatencyObserver()

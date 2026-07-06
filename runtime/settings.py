@@ -24,20 +24,21 @@ class RuntimeSettings:
     mistral_stt_target_delay_ms: int
     mistral_tts_model: str
     mistral_tts_voice: str
-    # "mistral" (Voxtral TTS, current default) or "kokoro" (local, English-pinned,
-    # ~3x-realtime — kills the wrong-language artifacts and shortens the
-    # per-sentence pause). Kokoro reuses the same WAV-playback path, so switching
-    # needs no frontend change; flip VOICE_RUNTIME_TTS_PROVIDER=kokoro to test.
+    # TTS engine: "kokoro" (local, English-pinned, ~3x realtime) is the tested
+    # production choice; "mistral" (Voxtral TTS) is kept as a fallback. The env
+    # default stays "mistral" for backward compatibility with older deployments,
+    # so production must set VOICE_RUNTIME_TTS_PROVIDER=kokoro explicitly.
     tts_provider: str
     kokoro_voice: str
     kokoro_model_path: str
     kokoro_voices_path: str
-    # "http" (default): pre-render each utterance, play WAVs over HTTP. Audio and
-    # the transcript travel on separate paths, so they can drift out of sync.
-    # "webrtc": stream Kokoro audio over the WebRTC transport in-order with the
-    # transcript events — fixes A/V sync and removes the buffering pause. Only
-    # valid with tts_provider=kokoro (local, no network jitter that broke the
-    # old Mistral-over-WebRTC path).
+    # TTS transport: "webrtc" streams Kokoro audio over the WebRTC track,
+    # in-order with the transcript events — this is the tested production
+    # configuration (A/V stays in sync, no per-utterance buffering pause).
+    # "http" (env default, kept for backward compatibility) pre-renders each
+    # utterance and plays WAVs over HTTP; it works with either TTS engine and
+    # tolerates provider-side streaming jitter (the reason Mistral TTS cannot
+    # go over WebRTC directly). "webrtc" is only valid with tts_provider=kokoro.
     tts_transport: str
     vad_confidence: float
     vad_start_secs: float
@@ -47,6 +48,9 @@ class RuntimeSettings:
     voice_runtime_ice_servers: list[str]
     voice_runtime_cors_origins: list[str]
     log_tts_request_text: bool
+    # Debug only: dump each LLM request's full message context to /tmp (see
+    # LLMInputDebugProcessor). Contains student answers — keep off in production.
+    llm_input_debug: bool
 
 
 # Origins that must always be allowed, regardless of deployment env config.
@@ -154,6 +158,10 @@ def get_settings() -> RuntimeSettings:
         voice_runtime_cors_origins=_resolve_cors_origins(),
         log_tts_request_text=os.environ.get(
             "VOICE_RUNTIME_LOG_TTS_REQUEST_TEXT",
+            "false",
+        ).lower() in {"1", "true", "yes"},
+        llm_input_debug=os.environ.get(
+            "VOICE_RUNTIME_LLM_INPUT_DEBUG",
             "false",
         ).lower() in {"1", "true", "yes"},
     )

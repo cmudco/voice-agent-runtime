@@ -85,7 +85,6 @@ class BrowserEventProcessor(FrameProcessor):
         self._agent_context_id: str | None = None
         self._agent_turn_id = 0
         self._agent_audio_started = False
-        self._agent_preview_emitted = False
         self._agent_expects_llm_end = False
 
     async def _emit(self, message: dict) -> None:
@@ -114,7 +113,6 @@ class BrowserEventProcessor(FrameProcessor):
                 "isFinal": False,
             }
         )
-        self._agent_preview_emitted = True
 
     async def _finalize_agent_turn(self) -> None:
         agent_text = _normalize_transcript_text(self._agent_parts)
@@ -144,7 +142,6 @@ class BrowserEventProcessor(FrameProcessor):
         self._agent_preview_context_id = None
         self._agent_context_id = None
         self._agent_audio_started = False
-        self._agent_preview_emitted = False
         self._agent_expects_llm_end = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -157,14 +154,14 @@ class BrowserEventProcessor(FrameProcessor):
             await self._finalize_agent_turn()
 
         elif isinstance(frame, InterruptionFrame):
-            # The audible agent path now plays runtime WAVs over HTTP, so the
-            # browser still needs an explicit data-channel interrupt signal to
-            # clear queued or currently playing audio.
+            # The browser needs an explicit data-channel interrupt signal on
+            # barge-in: it clears the pending-reply UI state, and on the HTTP
+            # WAV fallback transport it also stops queued/playing utterances
+            # (the WebRTC audio track is cut by the transport itself).
             await self._emit({"type": "interrupt"})
             await self._emit({"type": "speaking", "isSpeaking": False})
             await self._emit({"type": "processing", "isProcessing": False})
             self._agent_audio_started = False
-            self._agent_preview_emitted = False
             self._agent_parts.clear()
             self._agent_preview_parts.clear()
             self._agent_preview_context_id = None
@@ -186,7 +183,6 @@ class BrowserEventProcessor(FrameProcessor):
                 self._agent_turn_id = self._turn_coordinator.start_audio_turn()
                 self._agent_parts = []
                 self._agent_audio_started = False
-                self._agent_preview_emitted = False
                 self._agent_preview_parts = []
                 self._agent_preview_context_id = frame.context_id
             logger.info(
@@ -369,7 +365,13 @@ class ClientControlProcessor(FrameProcessor):
 
 
 class LLMInputDebugProcessor(FrameProcessor):
-    """Writes the exact LLM chat context sent to the brain model."""
+    """Writes the exact LLM chat context sent to the examiner model.
+
+    Debug aid only — dumps every request's messages (including student
+    answers) as JSON under ``/tmp/voice-runtime-audio/<session>/``. Only wired
+    into the pipeline when ``VOICE_RUNTIME_LLM_INPUT_DEBUG`` is enabled; keep
+    it off in production.
+    """
 
     def __init__(self, session_id: str):
         super().__init__()

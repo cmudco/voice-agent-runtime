@@ -1,4 +1,9 @@
-"""Buffered Mistral TTS and runtime WAV artifact writing."""
+"""Buffered TTS services for the HTTP WAV transport (tts_transport=http).
+
+Used when agent audio is played from pre-rendered WAVs over HTTP. The
+production configuration (Kokoro over WebRTC) bypasses this module — see the
+plain ``KokoroTTSService`` branch in ``pipecat_pipeline``.
+"""
 
 from pathlib import Path
 import wave
@@ -130,16 +135,13 @@ class BufferedMistralTTSService(_BufferedTTSMixin, MistralTTSService):
 
 
 class BufferedKokoroTTSService(_BufferedTTSMixin, KokoroTTSService):
-    """Buffered local Kokoro TTS — drop-in replacement for the Mistral engine.
+    """Buffered local Kokoro TTS for the HTTP WAV transport.
 
     Kokoro is English-pinned (no wrong-language artifacts) and renders ~3x
     faster than real time on CPU, so the per-utterance "thinking pause" is much
-    shorter than Mistral's. It reuses the exact same WAV-playback path via the
-    mixin, so switching engines needs no frontend change — set
-    ``VOICE_RUNTIME_TTS_PROVIDER=kokoro``.
-
-    Follow-up (needs a coordinated frontend change): stream Kokoro over WebRTC
-    to remove buffering entirely and drop first-audio latency to ~130 ms.
+    shorter than Mistral's. Only used with ``VOICE_RUNTIME_TTS_TRANSPORT=http``;
+    the production path streams Kokoro over WebRTC instead (no buffering, first
+    audio in ~130 ms — see ``pipecat_pipeline``).
     """
 
     def __init__(

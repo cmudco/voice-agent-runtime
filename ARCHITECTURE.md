@@ -1,7 +1,15 @@
 # Mistral Pipecat Voice Runtime Architecture
 
-This note documents the current Mistral voice-agent path after the WebRTC
-audio-jitter investigation and cleanup. The key decision is:
+> **Status: historical snapshot.** This note captures the HTTP-WAV era after
+> the WebRTC audio-jitter investigation. Since then, the tested production
+> configuration became **Kokoro TTS streamed over WebRTC**
+> (`VOICE_RUNTIME_TTS_PROVIDER=kokoro`, `VOICE_RUNTIME_TTS_TRANSPORT=webrtc`);
+> the HTTP WAV path described below is now the fallback transport. The
+> batch-STT shim (`runtime/batch_stt.py`) mentioned below has been removed —
+> STT is Voxtral realtime. See `README.md` for the current pipeline.
+
+This note documents the Mistral voice-agent path after the WebRTC
+audio-jitter investigation and cleanup. The key decision was:
 
 ```text
   WebRTC remains the live input/control lane.

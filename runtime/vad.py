@@ -12,13 +12,11 @@ settings = get_settings()
 
 # Per-agent eagerness translates to VAD ``stop_secs``: how long of silence
 # before treating the student as "done speaking" so the agent can respond.
-# Smaller = snappier; larger = more patient (good for thoughtful answers).
-#
-# Raised across the board: at the old values a natural mid-sentence pause ended
-# the turn, so the batch STT only got a fragment ("You work, right? the") — which
-# read as both truncation AND poor transcription. Oral-exam answers pause to
-# think, so we err toward patience. (A proper fix is semantic turn detection —
-# Smart Turn v3 — which needs the streaming-STT turn rework.)
+# Smaller = snappier; larger = more patient. Oral-exam answers pause to think,
+# so the values err toward patience — at lower values a natural mid-sentence
+# pause ended the turn and the STT only saw a fragment. Semantic turn
+# detection (e.g. Smart Turn) would be the principled replacement for these
+# fixed timeouts if turn-taking needs further tuning.
 EAGERNESS_TO_STOP_SECS = {
     "low": 2.0,
     "normal": 1.5,

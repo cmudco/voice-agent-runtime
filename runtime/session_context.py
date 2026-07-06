@@ -34,10 +34,6 @@ class SessionContext:
     # callbacks are sent back to the same backend that served the context.
     backend_url: str = ""
 
-    @classmethod
-    def empty(cls) -> "SessionContext":
-        return cls()
-
 
 class SessionContextError(Exception):
     """Raised when the runtime cannot fetch session context from Django."""
