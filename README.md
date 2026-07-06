@@ -24,7 +24,7 @@ VOICE_RUNTIME_CORS_ORIGINS=http://localhost:5174,http://127.0.0.1:5174
 VOICE_RUNTIME_LOG_TTS_REQUEST_TEXT=false
 MISTRAL_LLM_MODEL=mistral-large-latest
 MISTRAL_LLM_MAX_TOKENS=180
-MISTRAL_STT_MODEL=voxtral-mini-latest
+MISTRAL_STT_MODEL=voxtral-mini-transcribe-realtime-2602
 MISTRAL_STT_TARGET_DELAY_MS=600
 MISTRAL_TTS_MODEL=voxtral-mini-tts-2603
 MISTRAL_TTS_VOICE=en_paul_neutral
@@ -103,7 +103,7 @@ service on port `8010`.
 Browser mic
   -> WebRTC media track
   -> SmallWebRTCTransport
-  -> MistralBatchSTT
+  -> MistralSTTService (Voxtral realtime)
   -> user aggregator / Silero VAD
   -> Mistral LLM
   -> BufferedMistralTTSService
@@ -116,4 +116,3 @@ Browser mic
 Barge-in is handled through Pipecat's interruption flow. Latency metrics are
 captured through Pipecat observers and sent back to Django in the runtime
 completion callback.
-

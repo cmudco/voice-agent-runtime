@@ -12,6 +12,7 @@ from pipecat.frames.frames import (
     Frame,
     InputTransportMessageFrame,
     InterruptionFrame,
+    InterimTranscriptionFrame,
     LLMContextFrame,
     OutputAudioRawFrame,
     OutputTransportMessageUrgentFrame,
@@ -93,6 +94,12 @@ class BrowserEventProcessor(FrameProcessor):
         agent_text = _normalize_transcript_text(parts)
         if not agent_text:
             return
+        logger.info(
+            "[transcript] PREVIEW turn={} ctx={} text={!r}",
+            self._agent_turn_id,
+            self._agent_preview_context_id,
+            agent_text[:90],
+        )
         await self._emit(
             {
                 "type": "transcript_update",
@@ -114,6 +121,7 @@ class BrowserEventProcessor(FrameProcessor):
             # clear queued or currently playing audio.
             await self._emit({"type": "interrupt"})
             await self._emit({"type": "speaking", "isSpeaking": False})
+            await self._emit({"type": "processing", "isProcessing": False})
             self._agent_audio_started = False
             self._agent_preview_emitted = False
             self._agent_parts.clear()
@@ -130,6 +138,12 @@ class BrowserEventProcessor(FrameProcessor):
 
         elif isinstance(frame, TTSStartedFrame):
             self._agent_turn_id = self._turn_coordinator.start_audio_turn()
+            logger.info(
+                "Pipecat session {} TTS_STARTED turn={} ctx={}",
+                self._recorder.session_id,
+                self._agent_turn_id,
+                frame.context_id,
+            )
             self._agent_parts = []
             if frame.context_id != self._agent_preview_context_id:
                 self._agent_preview_parts = []
@@ -139,8 +153,14 @@ class BrowserEventProcessor(FrameProcessor):
 
         elif isinstance(frame, OutputAudioRawFrame) and not self._agent_audio_started:
             self._agent_audio_started = True
+            logger.info(
+                "Pipecat session {} AGENT_AUDIO_STARTED turn={}",
+                self._recorder.session_id,
+                self._agent_turn_id,
+            )
             await self._emit_agent_preview(self._agent_preview_parts)
             self._recorder.mark_runtime_started()
+            await self._emit({"type": "processing", "isProcessing": False})
             await self._emit({"type": "speaking", "isSpeaking": True})
             await self._emit({"type": "agent_audio_started", "turnId": self._agent_turn_id})
 
@@ -164,6 +184,13 @@ class BrowserEventProcessor(FrameProcessor):
             self._agent_preview_parts = []
             self._agent_preview_context_id = None
             if agent_text:
+                logger.info(
+                    "Pipecat session {} agent transcript FINAL turn={} chars={} text={!r}",
+                    self._recorder.session_id,
+                    self._agent_turn_id,
+                    len(agent_text),
+                    agent_text[:90],
+                )
                 entry = self._recorder.add_transcript("agent", agent_text)
                 await self._emit(
                     {
@@ -208,39 +235,80 @@ class UserTranscriptProcessor(FrameProcessor):
     def __init__(self, recorder: SessionRecorder):
         super().__init__()
         self._recorder = recorder
+        self._user_turn_id = 0
+        self._active_user_turn_id: int | None = None
 
-    async def _emit_user_transcript(self, text: str) -> None:
+    def _ensure_user_turn_id(self) -> int:
+        if self._active_user_turn_id is None:
+            self._user_turn_id += 1
+            self._active_user_turn_id = self._user_turn_id
+        return self._active_user_turn_id
+
+    async def _emit_user_transcript(self, text: str, *, is_final: bool) -> None:
         normalized = _normalize_transcript_text([text])
         if not normalized:
             return
-        entry = self._recorder.add_transcript("user", normalized)
+        turn_id = self._ensure_user_turn_id()
+        entry = (
+            self._recorder.add_transcript("user", normalized)
+            if is_final
+            else {"message": normalized, "timeInCallSecs": self._recorder.duration_seconds()}
+        )
         await self.push_frame(
             OutputTransportMessageUrgentFrame(
                 message={
-                    "type": "transcript",
+                    "type": "transcript_update",
                     "role": "user",
                     "message": entry["message"],
                     "content": entry["message"],
                     "timeInCallSecs": entry["timeInCallSecs"],
+                    "turnId": turn_id,
+                    "isFinal": is_final,
                 }
             ),
             FrameDirection.DOWNSTREAM,
         )
+        if is_final:
+            logger.info(
+                "Pipecat session {} user transcript FINAL turn={} chars={} text={!r}",
+                self._recorder.session_id,
+                turn_id,
+                len(normalized),
+                normalized[:90],
+            )
+            await self.push_frame(
+                OutputTransportMessageUrgentFrame(
+                    message={"type": "processing", "isProcessing": True}
+                ),
+                FrameDirection.DOWNSTREAM,
+            )
+            self._active_user_turn_id = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        # Emit on the TranscriptionFrame itself, NOT on UserStoppedSpeakingFrame.
-        # The batch STT delivers one final transcript per utterance, and the stop
-        # frame is a SystemFrame that is dispatched out-of-band - it overtakes the
-        # queued (DataFrame) transcript, so flushing on it would fire before the
-        # text arrives and emit nothing. The transcript frame carries the text in
-        # order, so recording/emitting here is race-free.
-        if isinstance(frame, TranscriptionFrame):
+        if isinstance(frame, UserStartedSpeakingFrame):
+            self._ensure_user_turn_id()
+
+        elif isinstance(frame, InterimTranscriptionFrame):
             text = _clean_transcript_text(frame.text or "")
             if text:
                 frame = replace(frame, text=text)
-                await self._emit_user_transcript(text)
+                await self._emit_user_transcript(text, is_final=False)
+
+        elif isinstance(frame, TranscriptionFrame):
+            text = _clean_transcript_text(frame.text or "")
+            if text:
+                language = getattr(frame, "language", None)
+                if language:
+                    logger.info(
+                        "Pipecat session {} STT detected_language={} final_text_preview={!r}",
+                        self._recorder.session_id,
+                        language,
+                        text[:90],
+                    )
+                frame = replace(frame, text=text)
+                await self._emit_user_transcript(text, is_final=True)
 
         await self.push_frame(frame, direction)
 

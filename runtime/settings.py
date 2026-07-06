@@ -32,6 +32,13 @@ class RuntimeSettings:
     kokoro_voice: str
     kokoro_model_path: str
     kokoro_voices_path: str
+    # "http" (default): pre-render each utterance, play WAVs over HTTP. Audio and
+    # the transcript travel on separate paths, so they can drift out of sync.
+    # "webrtc": stream Kokoro audio over the WebRTC transport in-order with the
+    # transcript events — fixes A/V sync and removes the buffering pause. Only
+    # valid with tts_provider=kokoro (local, no network jitter that broke the
+    # old Mistral-over-WebRTC path).
+    tts_transport: str
     vad_confidence: float
     vad_start_secs: float
     vad_stop_secs: float
@@ -106,7 +113,7 @@ def get_settings() -> RuntimeSettings:
         mistral_llm_max_tokens=int(os.environ.get("MISTRAL_LLM_MAX_TOKENS", "180")),
         mistral_stt_model=os.environ.get(
             "MISTRAL_STT_MODEL",
-            "voxtral-mini-latest",
+            "voxtral-mini-transcribe-realtime-2602",
         ),
         mistral_stt_target_delay_ms=int(
             os.environ.get("MISTRAL_STT_TARGET_DELAY_MS", "600")
@@ -118,6 +125,7 @@ def get_settings() -> RuntimeSettings:
         # Empty -> Kokoro auto-downloads its ONNX model/voices on first use.
         kokoro_model_path=os.environ.get("KOKORO_MODEL_PATH", ""),
         kokoro_voices_path=os.environ.get("KOKORO_VOICES_PATH", ""),
+        tts_transport=os.environ.get("VOICE_RUNTIME_TTS_TRANSPORT", "http").lower(),
         # confidence + min_volume were 0.7 / 0.6 — too strict, which forced
         # students to speak loudly and close to the mic (QA finding). Silero's
         # min_volume is a raw energy gate applied ON TOP of the model, so it was

@@ -10,6 +10,8 @@ RUNTIME_RULES = (
     "one brief acknowledgement, a concise helpful bridge when useful, and exactly "
     "one clear follow-up question. Avoid paragraph-length replies unless the "
     "student explicitly asks for an explanation. "
+    "When presenting a case study, speak it directly; do not wrap the whole "
+    "case in quotation marks or preface it with transcript-style punctuation. "
     "Vary the question style naturally across sessions so it does not feel "
     "scripted: use definitions, examples, scenarios, comparisons, or limitations "
     "as appropriate. Stay on the exam topic unless the student or exam "
@@ -157,6 +159,9 @@ def _clean_spoken_text(text: str) -> str:
         "**": "",
         "*": "",
         "`": "",
+        '"': "",
+        "“": "",
+        "”": "",
         "η": "eta",
         "α": "alpha",
         "β": "beta",
