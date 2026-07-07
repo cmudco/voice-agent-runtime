@@ -13,7 +13,6 @@ Start locally with:
 
 import asyncio
 import logging
-import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
@@ -42,15 +41,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-# Dev-only isolated STT/TTS test endpoints (see runtime/test_lab.py). Off by
-# default; enable locally with VOICE_RUNTIME_ENABLE_LAB=true.
-if os.environ.get("VOICE_RUNTIME_ENABLE_LAB", "").lower() in {"1", "true", "yes"}:
-    from runtime.test_lab import router as lab_router
-
-    app.include_router(lab_router)
-    logger.info("Voice Lab test endpoints enabled at /lab/*")
-
 
 class WebRTCOfferRequest(BaseModel):
     """Browser SDP offer for a Pipecat SmallWebRTC session."""
