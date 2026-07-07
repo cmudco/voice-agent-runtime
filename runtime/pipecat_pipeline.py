@@ -273,6 +273,17 @@ async def _run_transport_session(
         observers=[startup_observer, latency_observer],
     )
 
+    def _runtime_ready_frame() -> OutputTransportMessageUrgentFrame:
+        return OutputTransportMessageUrgentFrame(
+            message={
+                "type": "runtime_ready",
+                "sessionId": claims.session_id,
+                # Tells the browser how to play agent audio: "webrtc" (play the
+                # live WebRTC track) or "http" (fetch pre-rendered WAVs).
+                "ttsTransport": settings.tts_transport,
+            }
+        )
+
     @transport.event_handler("on_client_connected")
     async def _on_connected(_transport, _client):
         logger.info("Pipecat client connected: {}", claims.session_id)
@@ -281,24 +292,29 @@ async def _run_transport_session(
         # transcript + browser event are emitted by BrowserEventProcessor
         # when this speech flows through (avoids a double-recorded line).
         agent_turns.start_preview_turn()
-        frames: list = [
-            OutputTransportMessageUrgentFrame(
-                message={
-                    "type": "runtime_ready",
-                    "sessionId": claims.session_id,
-                    # Tells the browser how to play agent audio: "webrtc" (play the
-                    # live WebRTC track) or "http" (fetch pre-rendered WAVs).
-                    "ttsTransport": settings.tts_transport,
-                }
-            ),
-        ]
         logger.info(
             "Pipecat session {} runtime_ready sent with ttsTransport={}",
             claims.session_id,
             settings.tts_transport,
         )
-        frames.append(TTSSpeakFrame(first_message))
-        await task.queue_frames(frames)
+        await task.queue_frames([_runtime_ready_frame(), TTSSpeakFrame(first_message)])
+
+    @transport.event_handler("on_app_message")
+    async def _on_app_message(_transport, message, _sender):
+        # The browser announces client_ready once its data channel opens.
+        # Answer with a fresh runtime_ready: the copy queued above at
+        # on_client_connected is lost whenever ICE connects before the
+        # browser's channel arrives — pipecat 1.2.1 never flushes its
+        # pre-channel message queue for channels that arrive already open —
+        # which leaves the remote audio track muted on real-network links
+        # (localhost never loses that race). A reply here cannot be lost:
+        # the request itself just arrived over the open channel.
+        if isinstance(message, dict) and message.get("type") == "client_ready":
+            await task.queue_frames([_runtime_ready_frame()])
+            logger.info(
+                "Pipecat session {} runtime_ready re-sent after client_ready",
+                claims.session_id,
+            )
 
     @transport.event_handler("on_client_disconnected")
     async def _on_disconnected(_transport, _client):
