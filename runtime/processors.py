@@ -12,7 +12,10 @@ from pipecat.frames.frames import (
     Frame,
     InputTransportMessageFrame,
     InterruptionFrame,
+    InterimTranscriptionFrame,
     LLMContextFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     OutputAudioRawFrame,
     OutputTransportMessageUrgentFrame,
     TranscriptionFrame,
@@ -79,9 +82,10 @@ class BrowserEventProcessor(FrameProcessor):
         self._agent_parts: list[str] = []
         self._agent_preview_parts: list[str] = []
         self._agent_preview_context_id: str | None = None
+        self._agent_context_id: str | None = None
         self._agent_turn_id = 0
         self._agent_audio_started = False
-        self._agent_preview_emitted = False
+        self._agent_expects_llm_end = False
 
     async def _emit(self, message: dict) -> None:
         await self.push_frame(
@@ -93,6 +97,12 @@ class BrowserEventProcessor(FrameProcessor):
         agent_text = _normalize_transcript_text(parts)
         if not agent_text:
             return
+        logger.info(
+            "[transcript] PREVIEW turn={} ctx={} text={!r}",
+            self._agent_turn_id,
+            self._agent_preview_context_id,
+            agent_text[:90],
+        )
         await self._emit(
             {
                 "type": "transcript_update",
@@ -103,22 +113,60 @@ class BrowserEventProcessor(FrameProcessor):
                 "isFinal": False,
             }
         )
-        self._agent_preview_emitted = True
+
+    async def _finalize_agent_turn(self) -> None:
+        agent_text = _normalize_transcript_text(self._agent_parts)
+        if agent_text:
+            logger.info(
+                "Pipecat session {} agent transcript FINAL turn={} chars={} text={!r}",
+                self._recorder.session_id,
+                self._agent_turn_id,
+                len(agent_text),
+                agent_text[:90],
+            )
+            entry = self._recorder.add_transcript("agent", agent_text)
+            await self._emit(
+                {
+                    "type": "transcript_update",
+                    "role": "agent",
+                    "message": entry["message"],
+                    "content": entry["message"],
+                    "timeInCallSecs": entry["timeInCallSecs"],
+                    "turnId": self._agent_turn_id,
+                    "isFinal": True,
+                }
+            )
+        await self._emit({"type": "speaking", "isSpeaking": False})
+        self._agent_parts = []
+        self._agent_preview_parts = []
+        self._agent_preview_context_id = None
+        self._agent_context_id = None
+        self._agent_audio_started = False
+        self._agent_expects_llm_end = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, InterruptionFrame):
-            # The audible agent path now plays runtime WAVs over HTTP, so the
-            # browser still needs an explicit data-channel interrupt signal to
-            # clear queued or currently playing audio.
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self._agent_expects_llm_end = True
+
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            await self._finalize_agent_turn()
+
+        elif isinstance(frame, InterruptionFrame):
+            # The browser needs an explicit data-channel interrupt signal on
+            # barge-in: it clears the pending-reply UI state, and on the HTTP
+            # WAV fallback transport it also stops queued/playing utterances
+            # (the WebRTC audio track is cut by the transport itself).
             await self._emit({"type": "interrupt"})
             await self._emit({"type": "speaking", "isSpeaking": False})
+            await self._emit({"type": "processing", "isProcessing": False})
             self._agent_audio_started = False
-            self._agent_preview_emitted = False
             self._agent_parts.clear()
             self._agent_preview_parts.clear()
             self._agent_preview_context_id = None
+            self._agent_context_id = None
+            self._agent_expects_llm_end = False
             self._turn_coordinator.clear_preview_turn()
 
         elif isinstance(frame, UserStartedSpeakingFrame):
@@ -129,18 +177,34 @@ class BrowserEventProcessor(FrameProcessor):
             await self._emit({"type": "listening", "isListening": False})
 
         elif isinstance(frame, TTSStartedFrame):
-            self._agent_turn_id = self._turn_coordinator.start_audio_turn()
-            self._agent_parts = []
-            if frame.context_id != self._agent_preview_context_id:
+            is_new_context = frame.context_id != self._agent_context_id
+            if is_new_context:
+                self._agent_context_id = frame.context_id
+                self._agent_turn_id = self._turn_coordinator.start_audio_turn()
+                self._agent_parts = []
+                self._agent_audio_started = False
                 self._agent_preview_parts = []
                 self._agent_preview_context_id = frame.context_id
-            self._agent_audio_started = False
-            self._agent_preview_emitted = False
+            logger.info(
+                "Pipecat session {} TTS_STARTED turn={} ctx={} new_context={}",
+                self._recorder.session_id,
+                self._agent_turn_id,
+                frame.context_id,
+                is_new_context,
+            )
 
         elif isinstance(frame, OutputAudioRawFrame) and not self._agent_audio_started:
             self._agent_audio_started = True
-            await self._emit_agent_preview(self._agent_preview_parts)
+            logger.info(
+                "Pipecat session {} AGENT_AUDIO_STARTED turn={}",
+                self._recorder.session_id,
+                self._agent_turn_id,
+            )
+            await self._emit_agent_preview(
+                self._agent_parts if self._agent_parts else self._agent_preview_parts
+            )
             self._recorder.mark_runtime_started()
+            await self._emit({"type": "processing", "isProcessing": False})
             await self._emit({"type": "speaking", "isSpeaking": True})
             await self._emit({"type": "agent_audio_started", "turnId": self._agent_turn_id})
 
@@ -148,7 +212,7 @@ class BrowserEventProcessor(FrameProcessor):
             if self._agent_turn_id == 0:
                 self._agent_turn_id = self._turn_coordinator.start_audio_turn()
             self._agent_parts.append(frame.text)
-            if self._agent_audio_started and not self._agent_preview_emitted:
+            if self._agent_audio_started:
                 await self._emit_agent_preview(self._agent_parts)
 
         elif isinstance(frame, AggregatedTextFrame):
@@ -159,24 +223,8 @@ class BrowserEventProcessor(FrameProcessor):
             self._agent_preview_parts.append(frame.text)
 
         elif isinstance(frame, TTSStoppedFrame):
-            agent_text = _normalize_transcript_text(self._agent_parts)
-            self._agent_parts = []
-            self._agent_preview_parts = []
-            self._agent_preview_context_id = None
-            if agent_text:
-                entry = self._recorder.add_transcript("agent", agent_text)
-                await self._emit(
-                    {
-                        "type": "transcript_update",
-                        "role": "agent",
-                        "message": entry["message"],
-                        "content": entry["message"],
-                        "timeInCallSecs": entry["timeInCallSecs"],
-                        "turnId": self._agent_turn_id,
-                        "isFinal": True,
-                    }
-                )
-            await self._emit({"type": "speaking", "isSpeaking": False})
+            if not self._agent_expects_llm_end:
+                await self._finalize_agent_turn()
 
         elif isinstance(frame, ErrorFrame):
             await self._emit(
@@ -208,39 +256,80 @@ class UserTranscriptProcessor(FrameProcessor):
     def __init__(self, recorder: SessionRecorder):
         super().__init__()
         self._recorder = recorder
+        self._user_turn_id = 0
+        self._active_user_turn_id: int | None = None
 
-    async def _emit_user_transcript(self, text: str) -> None:
+    def _ensure_user_turn_id(self) -> int:
+        if self._active_user_turn_id is None:
+            self._user_turn_id += 1
+            self._active_user_turn_id = self._user_turn_id
+        return self._active_user_turn_id
+
+    async def _emit_user_transcript(self, text: str, *, is_final: bool) -> None:
         normalized = _normalize_transcript_text([text])
         if not normalized:
             return
-        entry = self._recorder.add_transcript("user", normalized)
+        turn_id = self._ensure_user_turn_id()
+        entry = (
+            self._recorder.add_transcript("user", normalized)
+            if is_final
+            else {"message": normalized, "timeInCallSecs": self._recorder.duration_seconds()}
+        )
         await self.push_frame(
             OutputTransportMessageUrgentFrame(
                 message={
-                    "type": "transcript",
+                    "type": "transcript_update",
                     "role": "user",
                     "message": entry["message"],
                     "content": entry["message"],
                     "timeInCallSecs": entry["timeInCallSecs"],
+                    "turnId": turn_id,
+                    "isFinal": is_final,
                 }
             ),
             FrameDirection.DOWNSTREAM,
         )
+        if is_final:
+            logger.info(
+                "Pipecat session {} user transcript FINAL turn={} chars={} text={!r}",
+                self._recorder.session_id,
+                turn_id,
+                len(normalized),
+                normalized[:90],
+            )
+            await self.push_frame(
+                OutputTransportMessageUrgentFrame(
+                    message={"type": "processing", "isProcessing": True}
+                ),
+                FrameDirection.DOWNSTREAM,
+            )
+            self._active_user_turn_id = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        # Emit on the TranscriptionFrame itself, NOT on UserStoppedSpeakingFrame.
-        # The batch STT delivers one final transcript per utterance, and the stop
-        # frame is a SystemFrame that is dispatched out-of-band - it overtakes the
-        # queued (DataFrame) transcript, so flushing on it would fire before the
-        # text arrives and emit nothing. The transcript frame carries the text in
-        # order, so recording/emitting here is race-free.
-        if isinstance(frame, TranscriptionFrame):
+        if isinstance(frame, UserStartedSpeakingFrame):
+            self._ensure_user_turn_id()
+
+        elif isinstance(frame, InterimTranscriptionFrame):
             text = _clean_transcript_text(frame.text or "")
             if text:
                 frame = replace(frame, text=text)
-                await self._emit_user_transcript(text)
+                await self._emit_user_transcript(text, is_final=False)
+
+        elif isinstance(frame, TranscriptionFrame):
+            text = _clean_transcript_text(frame.text or "")
+            if text:
+                language = getattr(frame, "language", None)
+                if language:
+                    logger.info(
+                        "Pipecat session {} STT detected_language={} final_text_preview={!r}",
+                        self._recorder.session_id,
+                        language,
+                        text[:90],
+                    )
+                frame = replace(frame, text=text)
+                await self._emit_user_transcript(text, is_final=True)
 
         await self.push_frame(frame, direction)
 
@@ -276,7 +365,13 @@ class ClientControlProcessor(FrameProcessor):
 
 
 class LLMInputDebugProcessor(FrameProcessor):
-    """Writes the exact LLM chat context sent to the brain model."""
+    """Writes the exact LLM chat context sent to the examiner model.
+
+    Debug aid only — dumps every request's messages (including student
+    answers) as JSON under ``/tmp/voice-runtime-audio/<session>/``. Only wired
+    into the pipeline when ``VOICE_RUNTIME_LLM_INPUT_DEBUG`` is enabled; keep
+    it off in production.
+    """
 
     def __init__(self, session_id: str):
         super().__init__()

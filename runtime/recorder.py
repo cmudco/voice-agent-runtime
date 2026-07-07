@@ -124,10 +124,15 @@ class SessionRecorder:
             "transcript": self.transcript,
             "metrics": {
                 "runtime": "pipecat",
+                "llmModel": settings.mistral_llm_model,
                 "sttModel": settings.mistral_stt_model,
+                "sttLanguageMode": "auto-detect",
                 "sttTargetDelayMs": settings.mistral_stt_target_delay_ms,
+                "ttsProvider": settings.tts_provider,
+                "ttsTransport": settings.tts_transport,
                 "ttsModel": settings.mistral_tts_model,
                 "ttsVoice": settings.mistral_tts_voice,
+                "kokoroVoice": settings.kokoro_voice,
                 **self.metrics,
             },
         }

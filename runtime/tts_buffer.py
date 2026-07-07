@@ -1,4 +1,9 @@
-"""Buffered Mistral TTS and runtime WAV artifact writing."""
+"""Buffered TTS services for the HTTP WAV transport (tts_transport=http).
+
+Used when agent audio is played from pre-rendered WAVs over HTTP. The
+production configuration (Kokoro over WebRTC) bypasses this module — see the
+plain ``KokoroTTSService`` branch in ``pipecat_pipeline``.
+"""
 
 from pathlib import Path
 import wave
@@ -8,47 +13,25 @@ import numpy as np
 import soxr
 
 from pipecat.frames.frames import OutputTransportMessageUrgentFrame, TTSAudioRawFrame
+from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.services.mistral.tts import MistralTTSService
 
 
 RUNTIME_AUDIO_DIR = Path("/tmp/voice-runtime-audio")
 
 
-class BufferedMistralTTSService(MistralTTSService):
-    """Pre-renders the full utterance before yielding any audio.
+class _BufferedTTSMixin:
+    """Pre-render the full utterance, then yield one consolidated audio frame.
 
-    Mistral's Voxtral TTS streams audio chunks with irregular cadence — we
-    routinely see 200–900 ms gaps mid-utterance, which exceeds Pipecat's
-    500 ms upstream-jitter buffer and causes audible stutter on WebRTC.
-
-    This subclass collects every audio chunk for a single ``run_tts`` call,
-    concatenates them, and yields one consolidated ``TTSAudioRawFrame``.
-    The transport's output pacer then emits the audio at a perfectly steady
-    cadence over WebRTC — zero mid-stream gaps possible because nothing
-    leaves until the whole utterance is in hand.
-
-    Trade-off: agent's first audio is delayed by the full TTS generation
-    time (~1–1.5 s typical) instead of ~90 ms. For a Socratic exam where
-    turns are 5–15 s long, that "thinking pause" feels natural; mid-
-    sentence jitter does not.
-
-    Reversible: drop this subclass and switch back to ``MistralTTSService``
-    the moment Mistral's streaming cadence improves.
-
-    Playback side effect (when ``session_id`` is provided): each pre-rendered
-    utterance is also written to ``RUNTIME_AUDIO_DIR / <session_id> /
-    utterance-<n>.wav`` so the frontend can fetch and play the stable source
-    PCM through a plain ``<audio>`` element.
+    Shared by the Mistral and Kokoro buffered services. The base TTS service's
+    ``run_tts`` streams ``TTSAudioRawFrame`` chunks; this mixin collects them,
+    resamples to the transport rate, writes source + transport WAVs for the
+    frontend's HTTP ``<audio>`` playback, and emits a single steady frame. That
+    keeps the audio path identical regardless of engine, so swapping the engine
+    needs no frontend change.
     """
 
-    def __init__(
-        self,
-        *args,
-        session_id: str | None = None,
-        output_sample_rate: int | None = None,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
+    def _init_buffer(self, *, session_id: str | None, output_sample_rate: int | None) -> None:
         self._utterance_counter = 0
         self._output_sample_rate = output_sample_rate or self.sample_rate
         self._audio_dir: Path | None = None
@@ -67,15 +50,11 @@ class BufferedMistralTTSService(MistralTTSService):
             if isinstance(frame, TTSAudioRawFrame):
                 parts.append(bytes(frame.audio))
                 continue
-            # Pass non-audio frames (errors, etc.) through immediately
-            # so the pipeline can react to them.
             yield frame
         if parts:
             joined = b"".join(parts)
             output_audio = _resample_s16le_mono(
-                joined,
-                from_rate=sample_rate,
-                to_rate=self._output_sample_rate,
+                joined, from_rate=sample_rate, to_rate=self._output_sample_rate
             )
             output_audio = _pad_s16le_to_10ms(output_audio, self._output_sample_rate)
             utterance_files = self._dump_runtime_wavs(
@@ -98,10 +77,7 @@ class BufferedMistralTTSService(MistralTTSService):
                     }
                 )
             yield TTSAudioRawFrame(
-                output_audio,
-                self._output_sample_rate,
-                1,
-                context_id=context_id,
+                output_audio, self._output_sample_rate, 1, context_id=context_id
             )
 
     def _dump_runtime_wavs(
@@ -131,6 +107,52 @@ class BufferedMistralTTSService(MistralTTSService):
                 wav.writeframes(pcm_bytes)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not write runtime WAV {}: {}", path, exc)
+
+
+class BufferedMistralTTSService(_BufferedTTSMixin, MistralTTSService):
+    """Buffered Mistral Voxtral TTS.
+
+    Mistral's Voxtral TTS streams audio chunks with irregular cadence — we
+    routinely see 200–900 ms gaps mid-utterance, which exceeds Pipecat's
+    500 ms upstream-jitter buffer and causes audible stutter on WebRTC. The
+    mixin pre-renders the whole utterance so the transport emits it at a steady
+    cadence (zero mid-stream gaps) and writes WAVs for HTTP ``<audio>`` playback.
+
+    Trade-off: first audio is delayed by the full TTS generation time
+    (~1–1.5 s) instead of ~90 ms. For 5–15 s exam turns that "thinking pause"
+    reads as natural; mid-sentence jitter does not.
+    """
+
+    def __init__(
+        self,
+        *args,
+        session_id: str | None = None,
+        output_sample_rate: int | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._init_buffer(session_id=session_id, output_sample_rate=output_sample_rate)
+
+
+class BufferedKokoroTTSService(_BufferedTTSMixin, KokoroTTSService):
+    """Buffered local Kokoro TTS for the HTTP WAV transport.
+
+    Kokoro is English-pinned (no wrong-language artifacts) and renders ~3x
+    faster than real time on CPU, so the per-utterance "thinking pause" is much
+    shorter than Mistral's. Only used with ``VOICE_RUNTIME_TTS_TRANSPORT=http``;
+    the production path streams Kokoro over WebRTC instead (no buffering, first
+    audio in ~130 ms — see ``pipecat_pipeline``).
+    """
+
+    def __init__(
+        self,
+        *args,
+        session_id: str | None = None,
+        output_sample_rate: int | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._init_buffer(session_id=session_id, output_sample_rate=output_sample_rate)
 
 
 def _resample_s16le_mono(pcm_bytes: bytes, *, from_rate: int, to_rate: int) -> bytes:

@@ -24,13 +24,33 @@ class RuntimeSettings:
     mistral_stt_target_delay_ms: int
     mistral_tts_model: str
     mistral_tts_voice: str
+    # TTS engine: "kokoro" (local, English-pinned, ~3x realtime) is the tested
+    # production choice; "mistral" (Voxtral TTS) is kept as a fallback. The env
+    # default stays "mistral" for backward compatibility with older deployments,
+    # so production must set VOICE_RUNTIME_TTS_PROVIDER=kokoro explicitly.
+    tts_provider: str
+    kokoro_voice: str
+    kokoro_model_path: str
+    kokoro_voices_path: str
+    # TTS transport: "webrtc" streams Kokoro audio over the WebRTC track,
+    # in-order with the transcript events — this is the tested production
+    # configuration (A/V stays in sync, no per-utterance buffering pause).
+    # "http" (env default, kept for backward compatibility) pre-renders each
+    # utterance and plays WAVs over HTTP; it works with either TTS engine and
+    # tolerates provider-side streaming jitter (the reason Mistral TTS cannot
+    # go over WebRTC directly). "webrtc" is only valid with tts_provider=kokoro.
+    tts_transport: str
     vad_confidence: float
     vad_start_secs: float
     vad_stop_secs: float
     vad_min_volume: float
+    user_turn_stop_timeout: float
     voice_runtime_ice_servers: list[str]
     voice_runtime_cors_origins: list[str]
     log_tts_request_text: bool
+    # Debug only: dump each LLM request's full message context to /tmp (see
+    # LLMInputDebugProcessor). Contains student answers — keep off in production.
+    llm_input_debug: bool
 
 
 # Origins that must always be allowed, regardless of deployment env config.
@@ -98,17 +118,35 @@ def get_settings() -> RuntimeSettings:
         mistral_llm_max_tokens=int(os.environ.get("MISTRAL_LLM_MAX_TOKENS", "180")),
         mistral_stt_model=os.environ.get(
             "MISTRAL_STT_MODEL",
-            "voxtral-mini-latest",
+            "voxtral-mini-transcribe-realtime-2602",
         ),
         mistral_stt_target_delay_ms=int(
             os.environ.get("MISTRAL_STT_TARGET_DELAY_MS", "600")
         ),
         mistral_tts_model=os.environ.get("MISTRAL_TTS_MODEL", "voxtral-mini-tts-2603"),
         mistral_tts_voice=os.environ.get("MISTRAL_TTS_VOICE", "en_paul_neutral"),
-        vad_confidence=float(os.environ.get("VOICE_RUNTIME_VAD_CONFIDENCE", "0.7")),
+        tts_provider=os.environ.get("VOICE_RUNTIME_TTS_PROVIDER", "mistral").lower(),
+        kokoro_voice=os.environ.get("KOKORO_VOICE", "af_heart"),
+        # Empty -> Kokoro auto-downloads its ONNX model/voices on first use.
+        kokoro_model_path=os.environ.get("KOKORO_MODEL_PATH", ""),
+        kokoro_voices_path=os.environ.get("KOKORO_VOICES_PATH", ""),
+        tts_transport=os.environ.get("VOICE_RUNTIME_TTS_TRANSPORT", "http").lower(),
+        # confidence + min_volume were 0.7 / 0.6 — too strict, which forced
+        # students to speak loudly and close to the mic (QA finding). Silero's
+        # min_volume is a raw energy gate applied ON TOP of the model, so it was
+        # the main culprit for dropping soft speech and feeding the STT clipped
+        # fragments (a source of "Yes, I'm ready" -> "Thank you"-style errors).
+        # Lowered to catch normal conversational voice at a normal distance.
+        vad_confidence=float(os.environ.get("VOICE_RUNTIME_VAD_CONFIDENCE", "0.5")),
         vad_start_secs=float(os.environ.get("VOICE_RUNTIME_VAD_START_SECS", "0.2")),
         vad_stop_secs=float(os.environ.get("VOICE_RUNTIME_VAD_STOP_SECS", "1.2")),
-        vad_min_volume=float(os.environ.get("VOICE_RUNTIME_VAD_MIN_VOLUME", "0.6")),
+        vad_min_volume=float(os.environ.get("VOICE_RUNTIME_VAD_MIN_VOLUME", "0.35")),
+        # Pipecat's semantic turn detector is intentionally patient by default
+        # (5s). Keep VAD stable for natural pauses, but cap the fallback wait so
+        # a missed "done speaking" signal does not leave the UI blinking/listening.
+        user_turn_stop_timeout=float(
+            os.environ.get("VOICE_RUNTIME_USER_TURN_STOP_TIMEOUT", "2.0")
+        ),
         voice_runtime_ice_servers=[
             server.strip()
             for server in os.environ.get(
@@ -120,6 +158,10 @@ def get_settings() -> RuntimeSettings:
         voice_runtime_cors_origins=_resolve_cors_origins(),
         log_tts_request_text=os.environ.get(
             "VOICE_RUNTIME_LOG_TTS_REQUEST_TEXT",
+            "false",
+        ).lower() in {"1", "true", "yes"},
+        llm_input_debug=os.environ.get(
+            "VOICE_RUNTIME_LLM_INPUT_DEBUG",
             "false",
         ).lower() in {"1", "true", "yes"},
     )

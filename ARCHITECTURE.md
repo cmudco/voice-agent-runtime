@@ -1,7 +1,15 @@
 # Mistral Pipecat Voice Runtime Architecture
 
-This note documents the current Mistral voice-agent path after the WebRTC
-audio-jitter investigation and cleanup. The key decision is:
+> **Status: historical snapshot.** This note captures the HTTP-WAV era after
+> the WebRTC audio-jitter investigation. Since then, the tested production
+> configuration became **Kokoro TTS streamed over WebRTC**
+> (`VOICE_RUNTIME_TTS_PROVIDER=kokoro`, `VOICE_RUNTIME_TTS_TRANSPORT=webrtc`);
+> the HTTP WAV path described below is now the fallback transport. The
+> batch-STT shim (`runtime/batch_stt.py`) mentioned below has been removed —
+> STT is Voxtral realtime. See `README.md` for the current pipeline.
+
+This note documents the Mistral voice-agent path after the WebRTC
+audio-jitter investigation and cleanup. The key decision was:
 
 ```text
   WebRTC remains the live input/control lane.
@@ -234,25 +242,25 @@ The frontend queues these files and plays them sequentially.
   Pipecat VAD detects speech start
         |
         v
-  MistralBatchSTT buffers PCM for the turn
+  MistralSTTService streams PCM to Voxtral realtime
+        |
+        v
+  Voxtral realtime emits interim transcription frames
         |
         v
   Pipecat VAD detects speech stop
         |
         v
-  Runtime wraps buffered PCM as WAV
-        |
-        v
-  POST https://api.mistral.ai/v1/audio/transcriptions
+  Runtime flushes realtime STT audio
         |
         v
   Final transcript text enters Pipecat/LLM context
 ```
 
-Important wording: this is turn-level transcription using Mistral's
-transcription endpoint. It is not realtime streaming STT, and it is not Mistral
-async Batch Inference. The remaining latency comes mainly from turn-end
-detection plus the STT/LLM/TTS requests.
+Important wording: this is realtime streaming STT using Mistral's Voxtral
+Realtime API, not Mistral async Batch Inference. Interim transcripts are emitted
+while the student is speaking; finalization still depends on turn-end detection
+plus the realtime STT flush/LLM/TTS requests.
 
 ## Latency Tuning
 
@@ -273,8 +281,8 @@ Client framing:
   make the agent respond sooner, with the tradeoff that it may occasionally
   respond before the student is fully done thinking.
 
-  Once paid Mistral limits are available, benchmark realtime STT and/or higher
-  tier API limits against ElevenLabs using the same exam prompt and settings.
+  Benchmark Mistral realtime STT target delay and/or higher tier API limits
+  against ElevenLabs using the same exam prompt and settings.
 ```
 
 ## Relevant Code Map

@@ -11,20 +11,22 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from pipecat.observers.startup_timing_observer import StartupTimingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
+from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.services.mistral.llm import MistralLLMService
+from pipecat.services.mistral.stt import MistralSTTService
 from pipecat.services.mistral.tts import MistralTTSService
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 from runtime.audio_constants import (
     AGENT_OUTPUT_SAMPLE_RATE,
     BROWSER_INPUT_SAMPLE_RATE,
+    KOKORO_TTS_SAMPLE_RATE,
     MISTRAL_TTS_SAMPLE_RATE,
 )
-from runtime.batch_stt import MistralBatchSTT
 from runtime.processors import (
     AgentTurnCoordinator,
     BrowserEventProcessor,
@@ -42,7 +44,7 @@ from runtime.text_utils import (
     _normalize_tts_text,
     _resolve_first_message,
 )
-from runtime.tts_buffer import BufferedMistralTTSService
+from runtime.tts_buffer import BufferedKokoroTTSService, BufferedMistralTTSService
 from runtime.vad import _build_vad_analyzer
 
 
@@ -59,7 +61,9 @@ async def _run_transport_session(
     logger.info(
         (
             "Pipecat WebRTC session {} starting with stt_target_delay_ms={}, "
-            "vad_stop_secs={}, vad_start_secs={}, vad_confidence={}, vad_min_volume={}"
+            "vad_stop_secs={}, vad_start_secs={}, vad_confidence={}, vad_min_volume={}, "
+            "user_turn_stop_timeout={}, stt_model={}, llm_model={}, tts_provider={}, "
+            "tts_transport={}, kokoro_voice={}"
         ),
         claims.session_id,
         settings.mistral_stt_target_delay_ms,
@@ -67,29 +71,90 @@ async def _run_transport_session(
         settings.vad_start_secs,
         settings.vad_confidence,
         settings.vad_min_volume,
+        settings.user_turn_stop_timeout,
+        settings.mistral_stt_model,
+        settings.mistral_llm_model,
+        settings.tts_provider,
+        settings.tts_transport,
+        settings.kokoro_voice,
     )
 
-    # Batch transcription via the standard HTTP endpoint - the realtime
-    # WebSocket endpoint is billing-gated and 403s on the Experiment tier.
-    stt = MistralBatchSTT(
+    # Native streaming STT. Pipecat's MistralSTTService uses the official
+    # Mistral realtime SDK path (`/v1/audio/transcriptions/realtime`) and emits
+    # interim + final transcription frames, so the user turn can be finalized by
+    # Pipecat's normal streaming turn model instead of the old batch-STT shim.
+    # Important: pipecat-ai 1.2.1 exposes a `language` setting here, but the
+    # installed Mistral realtime SDK connect/update_session methods do not
+    # accept a language parameter. Treat realtime STT as multilingual auto-detect
+    # in logs/metrics rather than assuming the provider is hard-locked to
+    # English.
+    stt = MistralSTTService(
         api_key=settings.mistral_api_key,
-        model=settings.mistral_stt_model,
-        language="en" if _is_english_session(context.language) else None,
         sample_rate=BROWSER_INPUT_SAMPLE_RATE,
-    )
-    tts = BufferedMistralTTSService(
-        api_key=settings.mistral_api_key,
-        sample_rate=MISTRAL_TTS_SAMPLE_RATE,
-        text_transforms=[("*", _normalize_tts_text)],
-        settings=MistralTTSService.Settings(
-            model=settings.mistral_tts_model,
-            # Per-agent voice if set; otherwise the env default.
-            voice=context.voice_id or settings.mistral_tts_voice,
+        target_streaming_delay_ms=settings.mistral_stt_target_delay_ms,
+        settings=MistralSTTService.Settings(
+            model=settings.mistral_stt_model,
+            language=Language.EN if _is_english_session(context.language) else None,
         ),
-        output_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
-        # Enables stable HTTP playback of pre-rendered agent utterances.
-        session_id=claims.session_id,
     )
+    logger.info(
+        "Pipecat session {} STT language_hint={} effective_realtime_language_mode=auto-detect",
+        claims.session_id,
+        "en" if _is_english_session(context.language) else "auto",
+    )
+    # TTS engine (VOICE_RUNTIME_TTS_PROVIDER) and transport
+    # (VOICE_RUNTIME_TTS_TRANSPORT) select one of three paths:
+    #   kokoro + webrtc — streaming over the WebRTC track (tested production
+    #     configuration; in-sync with transcript events, no buffering pause)
+    #   kokoro + http   — buffered WAVs over HTTP (fallback)
+    #   mistral + http  — buffered Voxtral TTS WAVs over HTTP (fallback; Mistral's
+    #     irregular streaming cadence rules out sending it over WebRTC directly)
+    # The browser learns the active transport from the runtime_ready message.
+    if settings.tts_provider == "kokoro" and settings.tts_transport == "webrtc":
+        # Streaming path: plain KokoroTTSService emits audio frames straight to
+        # transport.output() (WebRTC), interleaved in-order with the transcript
+        # events from BrowserEventProcessor — so audio and text stay in sync and
+        # there is no per-utterance buffering pause. No WAVs are written, so the
+        # frontend must play the WebRTC track (it's told to via runtime_ready).
+        # It resamples Kokoro's native 24k straight to the 48k transport rate.
+        tts = KokoroTTSService(
+            sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
+            text_transforms=[("*", _normalize_tts_text)],
+            settings=KokoroTTSService.Settings(
+                voice=settings.kokoro_voice,
+                language=Language.EN,
+            ),
+            model_path=settings.kokoro_model_path or None,
+            voices_path=settings.kokoro_voices_path or None,
+        )
+    elif settings.tts_provider == "kokoro":
+        tts = BufferedKokoroTTSService(
+            sample_rate=KOKORO_TTS_SAMPLE_RATE,
+            text_transforms=[("*", _normalize_tts_text)],
+            settings=KokoroTTSService.Settings(
+                voice=settings.kokoro_voice,
+                language=Language.EN,
+            ),
+            # Point at pre-fetched model files if configured; else auto-download.
+            model_path=settings.kokoro_model_path or None,
+            voices_path=settings.kokoro_voices_path or None,
+            output_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
+            session_id=claims.session_id,
+        )
+    else:
+        tts = BufferedMistralTTSService(
+            api_key=settings.mistral_api_key,
+            sample_rate=MISTRAL_TTS_SAMPLE_RATE,
+            text_transforms=[("*", _normalize_tts_text)],
+            settings=MistralTTSService.Settings(
+                model=settings.mistral_tts_model,
+                # Per-agent voice if set; otherwise the env default.
+                voice=context.voice_id or settings.mistral_tts_voice,
+            ),
+            output_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
+            # Enables stable HTTP playback of pre-rendered agent utterances.
+            session_id=claims.session_id,
+        )
     llm = MistralLLMService(
         api_key=settings.mistral_api_key,
         settings=MistralLLMService.Settings(
@@ -112,45 +177,51 @@ async def _run_transport_session(
         llm_context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=_build_vad_analyzer(context.eagerness),
+            # Fallback cap for semantic-turn misses. Without this, Pipecat's
+            # default 5s wait can leave the browser in a misleading "listening"
+            # state after the student has clearly stopped talking.
+            user_turn_stop_timeout=settings.user_turn_stop_timeout,
             # "Turn Timeout" — how long of silence before the agent prompts.
             user_idle_timeout=float(context.turn_timeout_secs),
-            # Batch STT delivers the transcript asynchronously, *after* the VAD
-            # stop. The default stop strategy (Smart Turn) finalizes the turn on
-            # audio timing alone, so it can race ahead of the transcript and
-            # flush an empty user message — the agent then stays silent until the
-            # next utterance. External strategies hand turn boundaries to
-            # MistralBatchSTT, which closes the turn only once the transcript is
-            # in flight (see batch_stt.py), making finalization race-free.
-            user_turn_strategies=ExternalUserTurnStrategies(),
         ),
     )
 
     @tts.event_handler("on_tts_request")
     async def _on_tts_request(_tts, _context_id, text):
-        if settings.log_tts_request_text:
-            logger.debug("Pipecat session {} TTS request text: {}", claims.session_id, text)
+        cleaned = " ".join(str(text or "").split())
+        preview = cleaned if len(cleaned) <= 140 else f"{cleaned[:137]}..."
+        logger.info(
+            "Pipecat session {} TTS request ctx={} chars={} transport={} text={!r}",
+            claims.session_id,
+            _context_id,
+            len(cleaned),
+            settings.tts_transport,
+            preview,
+        )
 
     user_transcript = UserTranscriptProcessor(recorder)
     client_control = ClientControlProcessor(recorder)
-    llm_input_debug = LLMInputDebugProcessor(claims.session_id)
     agent_turns = AgentTurnCoordinator()
     browser_events = BrowserEventProcessor(recorder, agent_turns)
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            client_control,
-            stt,
-            user_transcript,
-            aggregators.user(),
-            llm_input_debug,
-            llm,
-            tts,
-            browser_events,
-            transport.output(),
-            aggregators.assistant(),
-        ]
-    )
+    stages = [
+        transport.input(),
+        client_control,
+        stt,
+        user_transcript,
+        aggregators.user(),
+        llm,
+        tts,
+        browser_events,
+        transport.output(),
+        aggregators.assistant(),
+    ]
+    if settings.llm_input_debug:
+        # Debug-only tap that dumps every LLM request context to /tmp; gated
+        # because the dumps contain student answers.
+        stages.insert(stages.index(llm), LLMInputDebugProcessor(claims.session_id))
+
+    pipeline = Pipeline(stages)
 
     startup_observer = StartupTimingObserver()
     latency_observer = UserBotLatencyObserver()
@@ -212,9 +283,20 @@ async def _run_transport_session(
         agent_turns.start_preview_turn()
         frames: list = [
             OutputTransportMessageUrgentFrame(
-                message={"type": "runtime_ready", "sessionId": claims.session_id}
+                message={
+                    "type": "runtime_ready",
+                    "sessionId": claims.session_id,
+                    # Tells the browser how to play agent audio: "webrtc" (play the
+                    # live WebRTC track) or "http" (fetch pre-rendered WAVs).
+                    "ttsTransport": settings.tts_transport,
+                }
             ),
         ]
+        logger.info(
+            "Pipecat session {} runtime_ready sent with ttsTransport={}",
+            claims.session_id,
+            settings.tts_transport,
+        )
         frames.append(TTSSpeakFrame(first_message))
         await task.queue_frames(frames)
 

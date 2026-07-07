@@ -42,7 +42,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class WebRTCOfferRequest(BaseModel):
     """Browser SDP offer for a Pipecat SmallWebRTC session."""
 
