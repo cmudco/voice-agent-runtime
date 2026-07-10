@@ -55,6 +55,11 @@ class RuntimeSettings:
     # levels only — never speech content — so it defaults on: it is the only
     # way to tell a silent browser track from speech lost below the VAD gate.
     audio_input_debug: bool
+    # STT liveness deadline (see SttLivenessWatchdog): seconds allowed between
+    # VAD closing a user turn and the first transcript before the Mistral
+    # socket is presumed dead and rebuilt with a replay. Healthy sessions
+    # respond well under 2s; <= 0 disables the watchdog.
+    stt_liveness_deadline_secs: float
 
 
 # Origins that must always be allowed, regardless of deployment env config.
@@ -172,4 +177,7 @@ def get_settings() -> RuntimeSettings:
             "VOICE_RUNTIME_AUDIO_INPUT_DEBUG",
             "true",
         ).lower() in {"1", "true", "yes"},
+        stt_liveness_deadline_secs=float(
+            os.environ.get("VOICE_RUNTIME_STT_LIVENESS_DEADLINE_SECS", "4.0")
+        ),
     )
