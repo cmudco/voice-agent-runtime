@@ -2,14 +2,18 @@
 
 from dataclasses import replace
 import json
+import time
 from pathlib import Path
 
+import numpy as np
+from pipecat.audio.utils import calculate_audio_volume
 from pipecat.frames.frames import (
     AggregatedTextFrame,
     CancelFrame,
     EndFrame,
     ErrorFrame,
     Frame,
+    InputAudioRawFrame,
     InputTransportMessageFrame,
     InterruptionFrame,
     InterimTranscriptionFrame,
@@ -57,6 +61,108 @@ class AgentTurnCoordinator:
 
     def clear_preview_turn(self) -> None:
         self._preview_turn_id = None
+
+
+class AudioInputDebugProcessor(FrameProcessor):
+    """Logs inbound mic-audio levels so dead-mic sessions are diagnosable.
+
+    "Voice not picked up" sessions have two very different causes the logs
+    could not previously distinguish: the browser delivering a silent audio
+    track (mic/permission/unmute problem on the client) versus real speech
+    arriving below the Silero VAD volume gate (``min_volume`` tuning problem
+    in the runtime). This taps the raw audio straight off the input transport
+    and periodically logs peak/RMS plus the same EBU-R128 volume measure the
+    VAD gate compares against ``min_volume``. Levels only — no speech content
+    is captured. Reading a session's lines:
+
+      no "inbound audio" lines at all  -> no mic frames reached the runtime
+      peak~0.000, vad_volume max ~0    -> track connected but digitally silent
+      vad_volume max < min_volume      -> speech present but gated by VAD
+      vad_volume max >= min_volume     -> input healthy; look downstream (STT)
+    """
+
+    SUMMARY_INTERVAL_SECS = 5.0
+    # VAD-comparable volume is computed over sub-chunks about this long, so a
+    # short utterance inside an otherwise quiet window still shows its true
+    # loudness instead of being averaged away.
+    VOLUME_CHUNK_SECS = 0.25
+
+    def __init__(self, session_id: str, *, min_volume: float, confidence: float):
+        super().__init__()
+        self._session_id = session_id
+        self._min_volume = min_volume
+        self._confidence = confidence
+        self._started_at = time.monotonic()
+        self._first_frame_logged = False
+        self._window_frames = 0
+        self._window_audio = bytearray()
+        self._sample_rate = 0
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, InputAudioRawFrame):
+            try:
+                self._observe(frame)
+            except Exception as exc:  # noqa: BLE001 - telemetry must not break the call
+                logger.warning(
+                    "Pipecat session {} inbound audio debug failed: {}",
+                    self._session_id,
+                    exc,
+                )
+        await self.push_frame(frame, direction)
+
+    def _observe(self, frame: InputAudioRawFrame) -> None:
+        self._sample_rate = frame.sample_rate or self._sample_rate
+        if not self._first_frame_logged:
+            self._first_frame_logged = True
+            logger.info(
+                "Pipecat session {} inbound mic audio flowing: first frame {:.2f}s "
+                "after pipeline start (sample_rate={} channels={})",
+                self._session_id,
+                time.monotonic() - self._started_at,
+                frame.sample_rate,
+                frame.num_channels,
+            )
+        self._window_frames += 1
+        self._window_audio.extend(frame.audio)
+        # Windows are measured in audio time, not wall-clock: every summary
+        # line covers the same amount of actual microphone signal.
+        window_secs = len(self._window_audio) / 2 / self._sample_rate
+        if window_secs >= self.SUMMARY_INTERVAL_SECS:
+            self._log_window(window_secs)
+            self._window_frames = 0
+            self._window_audio = bytearray()
+
+    def _log_window(self, elapsed: float) -> None:
+        samples = np.frombuffer(bytes(self._window_audio), dtype=np.int16)
+        if samples.size == 0 or not self._sample_rate:
+            return
+        peak = float(np.abs(samples.astype(np.int32)).max()) / 32768.0
+        rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float64))))) / 32768.0
+        chunk_bytes = max(2, int(self._sample_rate * self.VOLUME_CHUNK_SECS) * 2)
+        volumes = [
+            calculate_audio_volume(chunk, self._sample_rate)
+            for offset in range(0, len(self._window_audio), chunk_bytes)
+            if len(chunk := bytes(self._window_audio[offset : offset + chunk_bytes]))
+            >= chunk_bytes
+        ]
+        vol_max = max(volumes, default=0.0)
+        above_gate = sum(1 for volume in volumes if volume >= self._min_volume)
+        logger.info(
+            "Pipecat session {} inbound audio last {:.1f}s: frames={} peak={:.3f} "
+            "rms={:.4f} vad_volume max={:.2f} chunks_above_gate={}/{} "
+            "(gate: min_volume={} confidence={})",
+            self._session_id,
+            elapsed,
+            self._window_frames,
+            peak,
+            rms,
+            vol_max,
+            above_gate,
+            len(volumes),
+            self._min_volume,
+            self._confidence,
+        )
 
 
 class BrowserEventProcessor(FrameProcessor):
@@ -170,10 +276,18 @@ class BrowserEventProcessor(FrameProcessor):
             self._turn_coordinator.clear_preview_turn()
 
         elif isinstance(frame, UserStartedSpeakingFrame):
+            logger.info(
+                "Pipecat session {} VAD user_started_speaking",
+                self._recorder.session_id,
+            )
             await self._emit({"type": "interrupt"})
             await self._emit({"type": "listening", "isListening": True})
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
+            logger.info(
+                "Pipecat session {} VAD user_stopped_speaking",
+                self._recorder.session_id,
+            )
             await self._emit({"type": "listening", "isListening": False})
 
         elif isinstance(frame, TTSStartedFrame):
@@ -258,6 +372,7 @@ class UserTranscriptProcessor(FrameProcessor):
         self._recorder = recorder
         self._user_turn_id = 0
         self._active_user_turn_id: int | None = None
+        self._interim_logged_turn_id: int | None = None
 
     def _ensure_user_turn_id(self) -> int:
         if self._active_user_turn_id is None:
@@ -270,6 +385,16 @@ class UserTranscriptProcessor(FrameProcessor):
         if not normalized:
             return
         turn_id = self._ensure_user_turn_id()
+        if not is_final and turn_id != self._interim_logged_turn_id:
+            # First interim of the turn proves STT is hearing the student even
+            # when the turn later fails to finalize into a transcript.
+            self._interim_logged_turn_id = turn_id
+            logger.info(
+                "Pipecat session {} user transcript first interim turn={} text={!r}",
+                self._recorder.session_id,
+                turn_id,
+                normalized[:60],
+            )
         entry = (
             self._recorder.add_transcript("user", normalized)
             if is_final
