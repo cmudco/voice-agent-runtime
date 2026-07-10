@@ -29,6 +29,7 @@ from runtime.audio_constants import (
 )
 from runtime.processors import (
     AgentTurnCoordinator,
+    AudioInputDebugProcessor,
     BrowserEventProcessor,
     ClientControlProcessor,
     LLMInputDebugProcessor,
@@ -220,6 +221,17 @@ async def _run_transport_session(
         # Debug-only tap that dumps every LLM request context to /tmp; gated
         # because the dumps contain student answers.
         stages.insert(stages.index(llm), LLMInputDebugProcessor(claims.session_id))
+    if settings.audio_input_debug:
+        # Inbound mic-level telemetry, placed right after the transport so it
+        # sees the audio exactly as the VAD/STT will.
+        stages.insert(
+            stages.index(client_control),
+            AudioInputDebugProcessor(
+                claims.session_id,
+                min_volume=settings.vad_min_volume,
+                confidence=settings.vad_confidence,
+            ),
+        )
 
     pipeline = Pipeline(stages)
 

@@ -51,6 +51,10 @@ class RuntimeSettings:
     # Debug only: dump each LLM request's full message context to /tmp (see
     # LLMInputDebugProcessor). Contains student answers — keep off in production.
     llm_input_debug: bool
+    # Inbound mic-audio level telemetry (see AudioInputDebugProcessor). Logs
+    # levels only — never speech content — so it defaults on: it is the only
+    # way to tell a silent browser track from speech lost below the VAD gate.
+    audio_input_debug: bool
 
 
 # Origins that must always be allowed, regardless of deployment env config.
@@ -163,5 +167,9 @@ def get_settings() -> RuntimeSettings:
         llm_input_debug=os.environ.get(
             "VOICE_RUNTIME_LLM_INPUT_DEBUG",
             "false",
+        ).lower() in {"1", "true", "yes"},
+        audio_input_debug=os.environ.get(
+            "VOICE_RUNTIME_AUDIO_INPUT_DEBUG",
+            "true",
         ).lower() in {"1", "true", "yes"},
     )
