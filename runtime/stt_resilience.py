@@ -34,6 +34,76 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.mistral.stt import MistralSTTService
 
 
+class _TimeoutGuardedConnection:
+    """Wraps the SDK's RealtimeConnection so no socket write can hang.
+
+    ``send_audio``/``flush_audio`` are bare ``websocket.send()`` calls; on a
+    dud socket whose server stopped reading, the write buffer fills and they
+    block forever. The base STT service flushes on every turn end, so one
+    hung flush wedges the STT frame loop and deafens the whole pipeline for
+    the rest of the session (observed on dev: 3 minutes of loud speech with
+    zero VAD events). Here every write gets a deadline; on a miss the
+    connection is marked dead — the service's lazy reconnect then builds a
+    fresh one — and the socket is closed in the background, itself bounded.
+    """
+
+    WRITE_TIMEOUT_SECS = 3.0
+    CLOSE_TIMEOUT_SECS = 2.0
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._dead = False
+
+    def __getattr__(self, name):
+        # request_id, session, audio_format, events, ... delegate untouched.
+        return getattr(self._inner, name)
+
+    @property
+    def is_closed(self) -> bool:
+        return self._dead or self._inner.is_closed
+
+    async def send_audio(self, audio) -> None:
+        await self._bounded_write("send_audio", self._inner.send_audio(audio))
+
+    async def flush_audio(self) -> None:
+        await self._bounded_write("flush_audio", self._inner.flush_audio())
+
+    async def close(self, **kwargs) -> None:
+        self._dead = True
+        try:
+            await asyncio.wait_for(
+                self._inner.close(**kwargs), timeout=self.CLOSE_TIMEOUT_SECS
+            )
+        except Exception:  # noqa: BLE001 - closing a broken socket must not raise
+            pass
+
+    async def _bounded_write(self, op: str, write) -> None:
+        if self._dead:
+            # Reconnect happens at the service layer; dropping a write to a
+            # socket already declared dead is the recovery path, not an error.
+            write.close()
+            return
+        try:
+            await asyncio.wait_for(write, timeout=self.WRITE_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            self._dead = True
+            logger.warning(
+                "Mistral socket {} blocked for {}s — declaring the connection "
+                "dead so the service reconnects",
+                op,
+                self.WRITE_TIMEOUT_SECS,
+            )
+            asyncio.get_running_loop().create_task(self._force_close())
+
+    async def _force_close(self) -> None:
+        try:
+            await asyncio.wait_for(
+                self._inner.close(code=1001), timeout=self.CLOSE_TIMEOUT_SECS
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class ResilientMistralSTTService(MistralSTTService):
     """MistralSTTService that can rebuild its socket and replay buffered speech.
 
@@ -55,6 +125,13 @@ class ResilientMistralSTTService(MistralSTTService):
     async def cancel(self, frame: CancelFrame):
         self._session_over = True
         await super().cancel(frame)
+
+    async def _connect(self):
+        await super()._connect()
+        if self._connection is not None and not isinstance(
+            self._connection, _TimeoutGuardedConnection
+        ):
+            self._connection = _TimeoutGuardedConnection(self._connection)
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         # Audio frames queued behind the End/CancelFrame still reach this
@@ -181,32 +258,47 @@ class SttLivenessWatchdog(FrameProcessor):
         finally:
             self._watch_task = None
 
+    # Consecutive dud sockets are common when Mistral degrades (observed on
+    # dev: back-to-back duds killed two sessions in a row), so one rebuild is
+    # not enough — each attempt gets a brand-new socket and a fresh draw.
+    MAX_REBUILD_ATTEMPTS = 2
+
     async def _run_deadlines(self) -> None:
         if await self._transcript_within(self._deadline_secs):
             return
-        buffered = bytes(self._turn_audio)
-        logger.warning(
-            "Pipecat session {} STT stalled: VAD closed a turn but no transcript "
-            "within {}s — rebuilding socket and replaying {:.1f}s of speech",
-            self._session_id,
-            self._deadline_secs,
-            len(buffered) / self._bytes_per_sec,
-        )
-        replayed = await self._stt.replay(buffered)
-        # The realtime endpoint transcribes a replayed clip at roughly stream
-        # pace, so the post-replay wait must scale with the clip length —
-        # a fixed deadline made a good rebuilt socket look dead (observed on
-        # dev: 6.6s replay, 4s deadline).
-        replay_deadline = self._deadline_secs + len(buffered) / self._bytes_per_sec
-        if replayed and await self._transcript_within(replay_deadline):
-            logger.info(
-                "Pipecat session {} STT replay recovered the turn",
+        for attempt in range(1, self.MAX_REBUILD_ATTEMPTS + 1):
+            # Re-read each attempt: the student may keep talking into the
+            # stall and that speech belongs in the replay too.
+            buffered = bytes(self._turn_audio)
+            logger.warning(
+                "Pipecat session {} STT stalled: no transcript for a VAD-closed "
+                "turn — rebuild attempt {}/{}, replaying {:.1f}s of speech",
                 self._session_id,
+                attempt,
+                self.MAX_REBUILD_ATTEMPTS,
+                len(buffered) / self._bytes_per_sec,
             )
-            return
+            replayed = await self._stt.replay(buffered)
+            # The realtime endpoint transcribes a replayed clip at roughly
+            # stream pace, so the post-replay wait must scale with the clip
+            # length — a fixed deadline made a good rebuilt socket look dead
+            # (observed on dev: 6.6s replay, 4s deadline).
+            replay_deadline = (
+                self._deadline_secs + len(buffered) / self._bytes_per_sec
+            )
+            if replayed and await self._transcript_within(replay_deadline):
+                logger.info(
+                    "Pipecat session {} STT replay recovered the turn "
+                    "(attempt {})",
+                    self._session_id,
+                    attempt,
+                )
+                return
         logger.error(
-            "Pipecat session {} STT still silent after replay — surfacing error",
+            "Pipecat session {} STT still silent after {} rebuilds — "
+            "surfacing error",
             self._session_id,
+            self.MAX_REBUILD_ATTEMPTS,
         )
         await self.push_frame(
             ErrorFrame(
