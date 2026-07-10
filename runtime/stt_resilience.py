@@ -182,7 +182,7 @@ class SttLivenessWatchdog(FrameProcessor):
             self._watch_task = None
 
     async def _run_deadlines(self) -> None:
-        if await self._transcript_within_deadline():
+        if await self._transcript_within(self._deadline_secs):
             return
         buffered = bytes(self._turn_audio)
         logger.warning(
@@ -193,7 +193,12 @@ class SttLivenessWatchdog(FrameProcessor):
             len(buffered) / self._bytes_per_sec,
         )
         replayed = await self._stt.replay(buffered)
-        if replayed and await self._transcript_within_deadline():
+        # The realtime endpoint transcribes a replayed clip at roughly stream
+        # pace, so the post-replay wait must scale with the clip length —
+        # a fixed deadline made a good rebuilt socket look dead (observed on
+        # dev: 6.6s replay, 4s deadline).
+        replay_deadline = self._deadline_secs + len(buffered) / self._bytes_per_sec
+        if replayed and await self._transcript_within(replay_deadline):
             logger.info(
                 "Pipecat session {} STT replay recovered the turn",
                 self._session_id,
@@ -211,11 +216,9 @@ class SttLivenessWatchdog(FrameProcessor):
             FrameDirection.DOWNSTREAM,
         )
 
-    async def _transcript_within_deadline(self) -> bool:
+    async def _transcript_within(self, timeout_secs: float) -> bool:
         try:
-            await asyncio.wait_for(
-                self._transcript_event.wait(), timeout=self._deadline_secs
-            )
+            await asyncio.wait_for(self._transcript_event.wait(), timeout=timeout_secs)
             return True
         except asyncio.TimeoutError:
             return False

@@ -1,5 +1,7 @@
 """Pipecat full-duplex pipeline for the Socratic voice exam."""
 
+import asyncio
+
 from loguru import logger
 
 from pipecat.frames.frames import OutputTransportMessageUrgentFrame, TTSSpeakFrame
@@ -312,28 +314,59 @@ async def _run_transport_session(
             }
         )
 
-    @transport.event_handler("on_client_connected")
-    async def _on_connected(_transport, _client):
-        logger.info("Pipecat client connected: {}", claims.session_id)
+    # The greeting is held until the browser's data channel is confirmed open
+    # (client_ready). Speaking it at ICE-connect races the channel on real
+    # networks: pipecat 1.2.1 queues-and-drops data-channel messages sent
+    # before the channel arrives, so the greeting's speaking/transcript/
+    # agent_audio_started events were lost — the audio played, but the UI
+    # stayed stuck on "Connecting" (it only goes live on agent_audio_started)
+    # and the greeting was missing from the live transcript.
+    greeting_started = False
+    greeting_fallback_task: asyncio.Task | None = None
+    # Older frontends never announce client_ready; don't hold the greeting
+    # hostage to the handshake.
+    greeting_client_ready_timeout_secs = 3.0
+
+    async def _speak_greeting(trigger: str) -> None:
+        nonlocal greeting_started
+        if greeting_started:
+            return
+        greeting_started = True
         # Voice the opening line. It is already seeded into the LLM context
         # above so the model stays consistent with what was spoken. The
         # transcript + browser event are emitted by BrowserEventProcessor
         # when this speech flows through (avoids a double-recorded line).
         agent_turns.start_preview_turn()
         logger.info(
+            "Pipecat session {} greeting released ({})", claims.session_id, trigger
+        )
+        await task.queue_frames([TTSSpeakFrame(first_message)])
+
+    async def _greeting_fallback() -> None:
+        await asyncio.sleep(greeting_client_ready_timeout_secs)
+        await _speak_greeting(
+            f"no client_ready within {greeting_client_ready_timeout_secs}s"
+        )
+
+    @transport.event_handler("on_client_connected")
+    async def _on_connected(_transport, _client):
+        nonlocal greeting_fallback_task
+        logger.info("Pipecat client connected: {}", claims.session_id)
+        logger.info(
             "Pipecat session {} runtime_ready sent with ttsTransport={}",
             claims.session_id,
             settings.tts_transport,
         )
-        await task.queue_frames([_runtime_ready_frame(), TTSSpeakFrame(first_message)])
+        await task.queue_frames([_runtime_ready_frame()])
+        if not greeting_started and greeting_fallback_task is None:
+            greeting_fallback_task = asyncio.create_task(_greeting_fallback())
 
     @transport.event_handler("on_app_message")
     async def _on_app_message(_transport, message, _sender):
         # The browser announces client_ready once its data channel opens.
-        # Answer with a fresh runtime_ready: the copy queued above at
+        # Answer with a fresh runtime_ready: the copy queued at
         # on_client_connected is lost whenever ICE connects before the
-        # browser's channel arrives — pipecat 1.2.1 never flushes its
-        # pre-channel message queue for channels that arrive already open —
+        # browser's channel arrives (see the greeting comment above) —
         # which leaves the remote audio track muted on real-network links
         # (localhost never loses that race). A reply here cannot be lost:
         # the request itself just arrived over the open channel.
@@ -343,10 +376,15 @@ async def _run_transport_session(
                 "Pipecat session {} runtime_ready re-sent after client_ready",
                 claims.session_id,
             )
+            if greeting_fallback_task is not None:
+                greeting_fallback_task.cancel()
+            await _speak_greeting("client_ready")
 
     @transport.event_handler("on_client_disconnected")
     async def _on_disconnected(_transport, _client):
         logger.info("Pipecat client disconnected: {}", claims.session_id)
+        if greeting_fallback_task is not None:
+            greeting_fallback_task.cancel()
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=False)
