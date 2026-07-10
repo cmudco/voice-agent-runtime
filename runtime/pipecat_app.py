@@ -24,6 +24,7 @@ from pipecat.transports.smallwebrtc.request_handler import (
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
+from runtime.lab_pipeline import run_lab_webrtc_session
 from runtime.pipecat_pipeline import run_pipecat_webrtc_session
 from runtime.session_context import SessionContextError, fetch_session_context
 from runtime.session_tokens import SessionTokenError, validate_session_token
@@ -83,17 +84,25 @@ async def create_webrtc_session(
     """Authenticate, accept a browser WebRTC offer, and start the Pipecat task."""
     claims = _validate_claims(session_id, token)
 
-    try:
-        context = await fetch_session_context(session_id)
-    except SessionContextError as exc:
-        logger.warning("Pipecat WebRTC context fetch failed for %s: %s", session_id, exc)
-        raise HTTPException(status_code=502, detail="Failed to fetch session context") from exc
+    if claims.mode == "lab":
+        # STT Lab sessions are self-contained: no exam context to fetch, no
+        # Django callbacks — just mic → STT with everything mirrored back.
+        context = None
+    else:
+        try:
+            context = await fetch_session_context(session_id)
+        except SessionContextError as exc:
+            logger.warning("Pipecat WebRTC context fetch failed for %s: %s", session_id, exc)
+            raise HTTPException(status_code=502, detail="Failed to fetch session context") from exc
 
     handler = SmallWebRTCRequestHandler(ice_servers=settings.voice_runtime_ice_servers)
 
     async def _start_session(webrtc_connection):
-        logger.info("Started Pipecat WebRTC voice session %s", session_id)
-        asyncio.create_task(run_pipecat_webrtc_session(webrtc_connection, claims, context))
+        logger.info("Started Pipecat WebRTC voice session %s (mode=%s)", session_id, claims.mode)
+        if claims.mode == "lab":
+            asyncio.create_task(run_lab_webrtc_session(webrtc_connection, claims))
+        else:
+            asyncio.create_task(run_pipecat_webrtc_session(webrtc_connection, claims, context))
 
     request = SmallWebRTCRequest.from_dict(
         {

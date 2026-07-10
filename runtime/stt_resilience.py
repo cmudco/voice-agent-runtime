@@ -186,12 +186,16 @@ class SttLivenessWatchdog(FrameProcessor):
         *,
         sample_rate: int,
         deadline_secs: float,
+        event_sink=None,
     ):
         super().__init__()
         self._session_id = session_id
         self._stt = stt
         self._bytes_per_sec = sample_rate * 2
         self._deadline_secs = deadline_secs
+        # Optional async callable(dict) — the STT Lab mirrors watchdog
+        # lifecycle events to the browser through this.
+        self._event_sink = event_sink
         self._pre_roll: deque[bytes] = deque()
         self._pre_roll_bytes = 0
         self._turn_audio = bytearray()
@@ -263,6 +267,18 @@ class SttLivenessWatchdog(FrameProcessor):
     # not enough — each attempt gets a brand-new socket and a fresh draw.
     MAX_REBUILD_ATTEMPTS = 2
 
+    async def _emit_event(self, event: str, **fields) -> None:
+        if self._event_sink is None:
+            return
+        try:
+            await self._event_sink({"event": event, **fields})
+        except Exception as exc:  # noqa: BLE001 - telemetry must not break recovery
+            logger.warning(
+                "Pipecat session {} watchdog event sink failed: {}",
+                self._session_id,
+                exc,
+            )
+
     async def _run_deadlines(self) -> None:
         if await self._transcript_within(self._deadline_secs):
             return
@@ -277,6 +293,12 @@ class SttLivenessWatchdog(FrameProcessor):
                 attempt,
                 self.MAX_REBUILD_ATTEMPTS,
                 len(buffered) / self._bytes_per_sec,
+            )
+            await self._emit_event(
+                "stalled",
+                attempt=attempt,
+                maxAttempts=self.MAX_REBUILD_ATTEMPTS,
+                bufferedSecs=round(len(buffered) / self._bytes_per_sec, 1),
             )
             replayed = await self._stt.replay(buffered)
             # The realtime endpoint transcribes a replayed clip at roughly
@@ -293,6 +315,7 @@ class SttLivenessWatchdog(FrameProcessor):
                     self._session_id,
                     attempt,
                 )
+                await self._emit_event("recovered", attempt=attempt)
                 return
         logger.error(
             "Pipecat session {} STT still silent after {} rebuilds — "
@@ -300,6 +323,7 @@ class SttLivenessWatchdog(FrameProcessor):
             self._session_id,
             self.MAX_REBUILD_ATTEMPTS,
         )
+        await self._emit_event("failed", attempts=self.MAX_REBUILD_ATTEMPTS)
         await self.push_frame(
             ErrorFrame(
                 error="Speech service stalled — please repeat your answer.",
