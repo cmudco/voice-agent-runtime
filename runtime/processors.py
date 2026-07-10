@@ -474,14 +474,23 @@ class ClientControlProcessor(FrameProcessor):
     def __init__(self, recorder: SessionRecorder):
         super().__init__()
         self._recorder = recorder
+        self._client_ended = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+
+        # Once the client has ended the session, stop forwarding mic audio:
+        # the transport keeps delivering frames until the peer connection
+        # actually closes, and downstream services (STT) would treat that
+        # dead-air as a live session.
+        if self._client_ended and isinstance(frame, InputAudioRawFrame):
+            return
 
         if isinstance(frame, InputTransportMessageFrame):
             message = frame.message if isinstance(frame.message, dict) else {}
             message_type = message.get("type")
             if message_type == "end":
+                self._client_ended = True
                 self._recorder.mark_client_ended()
                 await self.push_frame(
                     EndFrame(reason=message.get("reason", "client_ended")),
@@ -489,6 +498,7 @@ class ClientControlProcessor(FrameProcessor):
                 )
                 return
             if message_type == "cancel":
+                self._client_ended = True
                 await self.push_frame(
                     CancelFrame(reason=message.get("reason", "client_cancelled")),
                     direction,
