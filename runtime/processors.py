@@ -367,9 +367,12 @@ class UserTranscriptProcessor(FrameProcessor):
     downstream to the output transport and is serialized there.
     """
 
-    def __init__(self, recorder: SessionRecorder):
+    def __init__(self, recorder: SessionRecorder, liveness_watchdog=None):
         super().__init__()
         self._recorder = recorder
+        # SttLivenessWatchdog sits upstream of STT so it never sees the
+        # interim/final frames itself; this processor reports them to it.
+        self._liveness_watchdog = liveness_watchdog
         self._user_turn_id = 0
         self._active_user_turn_id: int | None = None
         self._interim_logged_turn_id: int | None = None
@@ -437,12 +440,18 @@ class UserTranscriptProcessor(FrameProcessor):
             self._ensure_user_turn_id()
 
         elif isinstance(frame, InterimTranscriptionFrame):
+            # Any STT response — even empty — proves the socket is alive, so
+            # report it before the text checks (see SttLivenessWatchdog).
+            if self._liveness_watchdog is not None:
+                self._liveness_watchdog.notify_transcript(is_final=False)
             text = _clean_transcript_text(frame.text or "")
             if text:
                 frame = replace(frame, text=text)
                 await self._emit_user_transcript(text, is_final=False)
 
         elif isinstance(frame, TranscriptionFrame):
+            if self._liveness_watchdog is not None:
+                self._liveness_watchdog.notify_transcript(is_final=True)
             text = _clean_transcript_text(frame.text or "")
             if text:
                 language = getattr(frame, "language", None)

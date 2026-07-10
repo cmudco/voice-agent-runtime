@@ -39,6 +39,7 @@ from runtime.recorder import SessionRecorder
 from runtime.session_context import SessionContext
 from runtime.session_tokens import SessionClaims
 from runtime.settings import get_settings
+from runtime.stt_resilience import ResilientMistralSTTService, SttLivenessWatchdog
 from runtime.text_utils import (
     _build_system_prompt,
     _is_english_session,
@@ -89,7 +90,11 @@ async def _run_transport_session(
     # accept a language parameter. Treat realtime STT as multilingual auto-detect
     # in logs/metrics rather than assuming the provider is hard-locked to
     # English.
-    stt = MistralSTTService(
+    # ResilientMistralSTTService adds socket-rebuild + replay on top; Mistral's
+    # realtime gateway sometimes issues "dud" sessions that accept audio but
+    # never transcribe (mute-but-open socket, eventually a 1011 upstream
+    # error), which the base service cannot detect. See runtime/stt_resilience.
+    stt = ResilientMistralSTTService(
         api_key=settings.mistral_api_key,
         sample_rate=BROWSER_INPUT_SAMPLE_RATE,
         target_streaming_delay_ms=settings.mistral_stt_target_delay_ms,
@@ -97,6 +102,16 @@ async def _run_transport_session(
             model=settings.mistral_stt_model,
             language=Language.EN if _is_english_session(context.language) else None,
         ),
+    )
+    stt_watchdog = (
+        SttLivenessWatchdog(
+            claims.session_id,
+            stt,
+            sample_rate=BROWSER_INPUT_SAMPLE_RATE,
+            deadline_secs=settings.stt_liveness_deadline_secs,
+        )
+        if settings.stt_liveness_deadline_secs > 0
+        else None
     )
     logger.info(
         "Pipecat session {} STT language_hint={} effective_realtime_language_mode=auto-detect",
@@ -200,7 +215,7 @@ async def _run_transport_session(
             preview,
         )
 
-    user_transcript = UserTranscriptProcessor(recorder)
+    user_transcript = UserTranscriptProcessor(recorder, liveness_watchdog=stt_watchdog)
     client_control = ClientControlProcessor(recorder)
     agent_turns = AgentTurnCoordinator()
     browser_events = BrowserEventProcessor(recorder, agent_turns)
@@ -208,6 +223,7 @@ async def _run_transport_session(
     stages = [
         transport.input(),
         client_control,
+        *([stt_watchdog] if stt_watchdog else []),
         stt,
         user_transcript,
         aggregators.user(),
