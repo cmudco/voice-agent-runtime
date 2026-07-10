@@ -46,14 +46,32 @@ class ResilientMistralSTTService(MistralSTTService):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._replay_lock = asyncio.Lock()
+        self._session_over = False
+
+    async def stop(self, frame: EndFrame):
+        self._session_over = True
+        await super().stop(frame)
+
+    async def cancel(self, frame: CancelFrame):
+        self._session_over = True
+        await super().cancel(frame)
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
+        # Audio frames queued behind the End/CancelFrame still reach this
+        # service after stop() has closed the socket; the base class would
+        # lazily reconnect for them, leaving an orphan Mistral session that
+        # dies with 1011/timeout errors ~30s after the session ended.
+        if self._session_over:
+            yield None
+            return
         async with self._replay_lock:
             async for frame in super().run_stt(audio):
                 yield frame
 
     async def replay(self, audio: bytes) -> bool:
         """Rebuild the connection and re-send ``audio`` for transcription."""
+        if self._session_over:
+            return False
         async with self._replay_lock:
             await self._disconnect()
             await self._connect()
