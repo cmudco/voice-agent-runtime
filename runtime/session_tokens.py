@@ -22,6 +22,10 @@ class SessionClaims:
     agent_id: int
     user_id: int
     expires_at: datetime
+    # "exam" (default) runs the full tutoring pipeline; "lab" runs the
+    # isolated STT Lab pipeline (mic → STT only, everything mirrored to the
+    # browser, no LLM/TTS/exam context).
+    mode: str = "exam"
 
 
 class SessionTokenError(Exception):
@@ -63,4 +67,5 @@ def validate_session_token(token: str, secret: str) -> SessionClaims:
         agent_id=int(payload["agent_id"]),
         user_id=int(payload["user_id"]),
         expires_at=expires_at,
+        mode=payload.get("mode", "exam"),
     )
