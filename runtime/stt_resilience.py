@@ -145,6 +145,13 @@ class ResilientMistralSTTService(MistralSTTService):
             async for frame in super().run_stt(audio):
                 yield frame
 
+    # Mistral rejects audio chunks over 262144 raw bytes (~8s at 16kHz mono),
+    # so replays must be sent in pieces. One second per send mirrors the
+    # live streaming cadence; found the hard way when a QA user's 12.9s
+    # answer made every replay fail with "Audio chunk exceeds maximum size"
+    # while shorter answers recovered fine.
+    REPLAY_CHUNK_BYTES = 32_000
+
     async def replay(self, audio: bytes) -> bool:
         """Rebuild the connection and re-send ``audio`` for transcription."""
         if self._session_over:
@@ -152,10 +159,21 @@ class ResilientMistralSTTService(MistralSTTService):
         async with self._replay_lock:
             await self._disconnect()
             await self._connect()
+            for offset in range(0, len(audio), self.REPLAY_CHUNK_BYTES):
+                if self._connection is None or self._connection.is_closed:
+                    logger.warning(
+                        "{}: replay aborted — connection lost after {}/{} bytes",
+                        self,
+                        offset,
+                        len(audio),
+                    )
+                    return False
+                await self._connection.send_audio(
+                    audio[offset : offset + self.REPLAY_CHUNK_BYTES]
+                )
             if self._connection is None or self._connection.is_closed:
                 logger.warning("{}: replay aborted — reconnect failed", self)
                 return False
-            await self._connection.send_audio(audio)
             await self._connection.flush_audio()
             return True
 
