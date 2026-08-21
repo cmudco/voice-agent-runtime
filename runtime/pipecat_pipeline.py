@@ -23,6 +23,7 @@ from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
+from runtime.sentry import tag_session
 from runtime.audio_constants import (
     AGENT_OUTPUT_SAMPLE_RATE,
     BROWSER_INPUT_SAMPLE_RATE,
@@ -61,6 +62,7 @@ async def _run_transport_session(
     context: "SessionContext",
 ) -> None:
     """Build and run the Pipecat WebRTC pipeline for one browser session."""
+    tag_session(claims, context.backend_url)
     recorder = SessionRecorder(claims.session_id, context.backend_url)
     logger.info(
         (

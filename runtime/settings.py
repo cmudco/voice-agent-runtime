@@ -15,6 +15,10 @@ load_dotenv(RUNTIME_DIR / ".env")
 @dataclass(frozen=True)
 class RuntimeSettings:
     mistral_api_key: str
+    # Sentry is a no-op when the DSN is empty (local dev).
+    sentry_dsn: str
+    sentry_environment: str
+    sentry_traces_sample_rate: float
     socratic_bots_backend_urls: list[str]
     dare_internal_key: str
     voice_runtime_session_secret: str
@@ -119,6 +123,11 @@ def get_settings() -> RuntimeSettings:
     internal_key = os.environ.get("DARE_INTERNAL_KEY", "")
     return RuntimeSettings(
         mistral_api_key=os.environ.get("MISTRAL_API_KEY", ""),
+        sentry_dsn=os.environ.get("SENTRY_DSN", ""),
+        sentry_environment=os.environ.get("SENTRY_ENVIRONMENT", "development"),
+        sentry_traces_sample_rate=float(
+            os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1")
+        ),
         socratic_bots_backend_urls=_resolve_backend_urls(),
         dare_internal_key=internal_key,
         voice_runtime_session_secret=os.environ.get("VOICE_RUNTIME_SESSION_SECRET")
