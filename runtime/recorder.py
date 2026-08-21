@@ -71,6 +71,16 @@ class SessionRecorder:
     def set_startup_metric(self, key: str, value: float) -> None:
         self.metrics.setdefault("startup", {})[key] = round(value, 3)
 
+    def add_brain_fallback(self, failed: str, next_model: str, reason: str) -> None:
+        self.metrics.setdefault("brainFallbacks", []).append(
+            {
+                "failed": failed,
+                "next": next_model,
+                "reason": reason[:300],
+                "timeInCallSecs": self.duration_seconds(),
+            }
+        )
+
     async def notify_backend_started(self) -> None:
         """POST the first-audio start event back to Django (idempotent)."""
         if self._started_notified:

@@ -24,6 +24,14 @@ class RuntimeSettings:
     voice_runtime_session_secret: str
     mistral_llm_model: str
     mistral_llm_max_tokens: int
+    # Brain fallback (see llm_resilience). Keys for non-Mistral providers are
+    # optional: a fallback model whose provider has no key is skipped.
+    openai_api_key: str
+    anthropic_api_key: str
+    gemini_api_key: str
+    llm_fallback_models: list[str]
+    llm_ttfb_deadline_secs: float
+    llm_response_timeout_secs: float
     mistral_stt_model: str
     mistral_stt_target_delay_ms: int
     mistral_tts_model: str
@@ -134,6 +142,23 @@ def get_settings() -> RuntimeSettings:
         or internal_key,
         mistral_llm_model=os.environ.get("MISTRAL_LLM_MODEL", "mistral-large-latest"),
         mistral_llm_max_tokens=int(os.environ.get("MISTRAL_LLM_MAX_TOKENS", "180")),
+        openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+        gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
+        llm_fallback_models=[
+            m.strip()
+            for m in os.environ.get(
+                "VOICE_RUNTIME_LLM_FALLBACKS",
+                "gpt-5.6-luna,claude-haiku-4-5-20251001,gemini-3.1-flash-lite",
+            ).split(",")
+            if m.strip()
+        ],
+        llm_ttfb_deadline_secs=float(
+            os.environ.get("VOICE_RUNTIME_LLM_TTFB_DEADLINE_SECS", "6.0")
+        ),
+        llm_response_timeout_secs=float(
+            os.environ.get("VOICE_RUNTIME_LLM_RESPONSE_TIMEOUT_SECS", "30.0")
+        ),
         mistral_stt_model=os.environ.get(
             "MISTRAL_STT_MODEL",
             "voxtral-mini-transcribe-realtime-2602",
