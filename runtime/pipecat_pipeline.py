@@ -16,13 +16,16 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.observers.startup_timing_observer import StartupTimingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.services.kokoro.tts import KokoroTTSService
-from pipecat.services.mistral.llm import MistralLLMService
 from pipecat.services.mistral.stt import MistralSTTService
 from pipecat.services.mistral.tts import MistralTTSService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
+import sentry_sdk
+
+from runtime.llm_providers import build_candidates
+from runtime.llm_resilience import ResilientLLMService
 from runtime.sentry import tag_session
 from runtime.audio_constants import (
     AGENT_OUTPUT_SAMPLE_RATE,
@@ -175,10 +178,42 @@ async def _run_transport_session(
             # Enables stable HTTP playback of pre-rendered agent utterances.
             session_id=claims.session_id,
         )
-    llm = MistralLLMService(
-        api_key=settings.mistral_api_key,
-        settings=MistralLLMService.Settings(
-            model=settings.mistral_llm_model,
+    candidates, keyless = build_candidates(
+        context.llm_model or settings.mistral_llm_model,
+        settings.llm_fallback_models,
+        settings,
+    )
+    if keyless:
+        logger.warning(
+            "Pipecat session {} brain models skipped (no API key): {}",
+            claims.session_id,
+            ", ".join(keyless),
+        )
+    if not candidates:
+        raise RuntimeError("No brain model has an API key configured")
+    logger.info(
+        "Pipecat session {} brain order: {} (ttfb deadline {}s)",
+        claims.session_id,
+        " -> ".join(c.label for c in candidates),
+        settings.llm_ttfb_deadline_secs,
+    )
+    sentry_sdk.set_tag("llm_model", candidates[0].model)
+
+    async def _on_brain_fallback(failed, nxt, reason):
+        recorder.add_brain_fallback(failed.label, nxt.label, reason)
+        sentry_sdk.capture_message(
+            f"Voice brain fallback: {failed.label} -> {nxt.label} ({reason})",
+            level="warning",
+        )
+
+    llm = ResilientLLMService(
+        candidates=candidates,
+        ttfb_deadline_secs=settings.llm_ttfb_deadline_secs,
+        response_timeout_secs=settings.llm_response_timeout_secs,
+        session_id=claims.session_id,
+        on_fallback=_on_brain_fallback,
+        settings=ResilientLLMService.Settings(
+            model=candidates[0].model,
             temperature=context.temperature,
             max_tokens=settings.mistral_llm_max_tokens,
         ),
