@@ -321,6 +321,13 @@ async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims) -> No
             audio_out_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
         ),
         conversation_id=claims.session_id,
+        # Pipecat prepends an RTVIProcessor by default, which forwards every
+        # upstream ErrorFrame (e.g. a recoverable Mistral STT timeout the
+        # watchdog is already handling) to the browser as {type: "error",
+        # data: {...}} — a shape the SB frontend does not read, so it rendered
+        # a generic fatal banner mid-session. The browser only understands the
+        # messages BrowserEventProcessor emits.
+        enable_rtvi=False,
     )
     task_holder["task"] = task
 
