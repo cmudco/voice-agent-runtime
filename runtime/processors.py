@@ -34,6 +34,7 @@ from loguru import logger
 
 from runtime.recorder import SessionRecorder
 from runtime.text_utils import _clean_transcript_text, _normalize_transcript_text
+from runtime.sentry import capture_browser_error
 
 
 RUNTIME_DEBUG_DIR = Path("/tmp/voice-runtime-audio")
@@ -341,6 +342,7 @@ class BrowserEventProcessor(FrameProcessor):
                 await self._finalize_agent_turn()
 
         elif isinstance(frame, ErrorFrame):
+            capture_browser_error(frame.error, fatal=frame.fatal)
             await self._emit(
                 {
                     "type": "error",

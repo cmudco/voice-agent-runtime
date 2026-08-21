@@ -45,6 +45,7 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 from runtime.audio_constants import AGENT_OUTPUT_SAMPLE_RATE, BROWSER_INPUT_SAMPLE_RATE
 from runtime.processors import AudioInputDebugProcessor
+from runtime.sentry import tag_session
 from runtime.session_tokens import SessionClaims
 from runtime.settings import get_settings
 from runtime.stt_resilience import ResilientMistralSTTService, SttLivenessWatchdog
@@ -240,6 +241,7 @@ class LabTranscriptMirror(FrameProcessor):
 
 async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims) -> None:
     """Build and run the isolated STT Lab pipeline for one browser session."""
+    tag_session(claims)
     logger.info(
         "STT Lab session {} starting for user {} (stt_model={}, gate min_volume={} "
         "confidence={}, liveness deadline={}s)",

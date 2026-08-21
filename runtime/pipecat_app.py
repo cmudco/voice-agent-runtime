@@ -27,6 +27,7 @@ from starlette.middleware.cors import CORSMiddleware
 from runtime.lab_pipeline import run_lab_webrtc_session
 from runtime.pipecat_pipeline import run_pipecat_webrtc_session
 from runtime.session_context import SessionContextError, fetch_session_context
+from runtime.sentry import init_sentry
 from runtime.session_tokens import SessionTokenError, validate_session_token
 from runtime.settings import get_settings
 from runtime.tts_buffer import RUNTIME_AUDIO_DIR
@@ -34,8 +35,13 @@ from runtime.tts_buffer import RUNTIME_AUDIO_DIR
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Socratic Books Pipecat Voice Runtime")
 settings = get_settings()
+# Must run before the app object exists so the Starlette/FastAPI integrations
+# can wrap it.
+if init_sentry(settings):
+    logger.info("Sentry enabled (environment=%s)", settings.sentry_environment)
+
+app = FastAPI(title="Socratic Books Pipecat Voice Runtime")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.voice_runtime_cors_origins,
