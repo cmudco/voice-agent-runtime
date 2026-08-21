@@ -149,7 +149,7 @@ def get_settings() -> RuntimeSettings:
             m.strip()
             for m in os.environ.get(
                 "VOICE_RUNTIME_LLM_FALLBACKS",
-                "gpt-5.6-luna,claude-haiku-4-5-20251001,gemini-3.1-flash-lite",
+                "gpt-5.6-luna,claude-haiku-4-5-20251001,mistral-large-latest",
             ).split(",")
             if m.strip()
         ],
