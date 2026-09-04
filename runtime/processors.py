@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import re
 import time
 from pathlib import Path
 
@@ -579,3 +580,48 @@ def _preview_message_content(content) -> str:
     if len(text) <= 180:
         return text
     return f"{text[:177]}..."
+
+
+ELAPSED_STAMP_RE = re.compile(r"^\[\d+:\d{2}\] \((?:user|agent)\) ")
+
+
+def format_elapsed(seconds: int) -> str:
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+class ElapsedTimestampProcessor(FrameProcessor):
+    """Prefix every context message with the elapsed exam time before each LLM call.
+
+    The aggregators store raw text, so the brain had no idea how long the exam
+    had been running and guessed. User messages are stamped with the time of the
+    request they trigger (the moment the student stopped talking, matching the
+    transcript's timeInCallSecs). Agent messages enter the context only after
+    they were spoken, so they are stamped lazily on the next request with the
+    time the request that produced them was made.
+    """
+
+    def __init__(self, recorder: SessionRecorder):
+        super().__init__()
+        self._recorder = recorder
+        self._agent_stamp = 0
+
+    def _stamp(self, messages: list[dict]) -> list[dict]:
+        now = self._recorder.duration_seconds()
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role not in ("user", "assistant") or not isinstance(content, str):
+                continue
+            if ELAPSED_STAMP_RE.match(content):
+                continue
+            label = "user" if role == "user" else "agent"
+            secs = now if role == "user" else self._agent_stamp
+            message["content"] = f"[{format_elapsed(secs)}] ({label}) {content}"
+        self._agent_stamp = now
+        return messages
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, LLMContextFrame):
+            frame.context.transform_messages(self._stamp)
+        await self.push_frame(frame, direction)

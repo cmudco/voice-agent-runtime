@@ -38,6 +38,7 @@ from runtime.processors import (
     AudioInputDebugProcessor,
     BrowserEventProcessor,
     ClientControlProcessor,
+    ElapsedTimestampProcessor,
     LLMInputDebugProcessor,
     UserTranscriptProcessor,
 )
@@ -266,6 +267,7 @@ async def _run_transport_session(
         stt,
         user_transcript,
         aggregators.user(),
+        ElapsedTimestampProcessor(recorder),
         llm,
         tts,
         browser_events,
