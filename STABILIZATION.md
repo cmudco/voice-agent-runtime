@@ -13,7 +13,7 @@
   client closes (bounded wait: 1.5 seconds). Older runtimes without acknowledgement
   still receive the end request, but the new UI reports that completion is unconfirmed.
 - A transient WebRTC disconnection gets 8 seconds to recover before teardown.
-- After two failed STT rebuild/replays, an enabled Whisper backup receives the
+- After one bounded STT rebuild/replay, an enabled Whisper backup receives the
   retained turn and stays active for the rest of that session. Late Mistral
   transcripts are suppressed. Each subsequent VAD-ended turn is transcribed
   by the backup without blocking the audio frame loop.
@@ -96,7 +96,7 @@ Manual voice acceptance cases:
   interruption recovery and exit reasons.
 - `PYTHONPATH=. python tests/smoke_whisper.py <synthetic-mono-16k-wav>` with the
   worker running and shared token in the environment: actual Pipecat pipeline,
-  two stubbed failed Mistral recoveries, real local HTTP inference, exactly one
+  one stubbed failed Mistral recovery, real local HTTP inference, exactly one
   recovered transcript, and clean pipeline shutdown. A 7.7-second synthetic
   answer was recovered in roughly 2.1 seconds using tiny.en on the local Mac.
   This is a smoke test, not a production model quality or concurrency benchmark.
@@ -105,3 +105,73 @@ Manual voice acceptance cases:
 No server capacity change, deployment, or broad Sentry suppression is included.
 Real-browser microphone/WebRTC acceptance and production-sized concurrency
 testing remain deployment gates; synthetic tests do not establish those.
+
+## Speech progress and user control
+
+The continuous-speech watchdog checks every 0.5 seconds. It requires recent
+incoming audio, at least two seconds classified as speech, and 12 seconds without
+new nonempty transcript text. Raw audio/noise alone is insufficient. VAD is not
+perfect: this is a safe recovery heuristic, not a diagnosis that Mistral failed.
+A fresh turn resets the progress clock; repeated identical interims do not.
+The existing post-VAD deadline remains active for short answers.
+
+`VOICE_RUNTIME_STT_PROGRESS_TIMEOUT_SECS=12` and
+`VOICE_RUNTIME_STT_RECONNECT_TIMEOUT_SECS=12` are configurable. The latter covers
+reconnect, buffered replay and recognition together. These are initial policy
+values, not latency guarantees: event-loop scheduling and backup inference add time.
+Whisper transcribes after a pause, never feeds an incomplete live monologue to the
+agent, and refuses overflowed buffers rather than silently losing the beginning.
+
+The STT Lab can start directly on Whisper using `sttProvider: whisper` in its
+authenticated offer. Non-lab sessions cannot select an initial provider through
+this field. Missing backup configuration returns 503 before creating a connection.
+Lab request timing excludes queue wait; transcript timing for backup measures
+batch-queue-to-final, not the original speech-end time when recovery delayed queuing.
+
+The reusable backup button sends `stt_switch` with a request ID. Its acknowledgement
+means the provider was selected, **not** that transcription succeeded. The UI waits
+up to eight seconds, accepts only a matching acknowledgement, and resolves pending
+requests on disconnect. Failed inference remains an explicit error.
+
+Runtime stage events are sequenced: listening, transcribing, thinking,
+preparing_voice, speaking, recovering. The UI rejects stale events and retains
+interruption/recovery precedence. `voice_stage_seen` is a best-effort post-render
+client acknowledgement; it does not establish that a human saw it or heard audio.
+
+## Local testing logs and Sentry
+
+Local/development/test runtime environments use **only `LOCAL_SENTRY_DSN`**.
+The frontend development build uses **only `VITE_LOCAL_SENTRY_DSN`**. Supply a DSN
+for a separate testing project. No DSN is provisioned or copied from production.
+Local events omit payloads, breadcrumbs, request data and local variables; tracing
+and browser replay are disabled locally. Production configuration is not muted.
+
+Use the capture wrapper when starting each backend. It runs the provided command
+without a shell, preserves terminal output, forwards termination to the child
+process group, and writes metadata-only JSONL files (five files × 5MB per service).
+The capture folder is owner-only; no audio, transcript text, request body, token or
+raw exception message is written. Files contain timestamps, error classes, HTTP
+status, session IDs and health-event names when present. This deliberately loses
+some debugging detail; it is not a raw log archive or a replacement for tracebacks.
+Review the folder before sharing it. Existing terminal output/debug dumps can
+still contain student data—do not share those indiscriminately.
+
+From the runtime repo, for example:
+
+```
+python scripts/local_logs.py --service runtime --directory local-logs/test-run -- \
+  python -m uvicorn runtime.pipecat_app:app --host 127.0.0.1 --port 8010
+```
+
+From the SB backend repo, with its Python 3.12 environment:
+
+```
+python ../voice-agent-runtime/scripts/local_logs.py --service sb-backend \
+  --directory ../voice-agent-runtime/local-logs/test-run -- \
+  python manage.py runserver 127.0.0.1:8001 --noreload
+```
+
+Use the same folder with `--service whisper` for the isolated worker, and
+`--service dare-backend` for DARE if testing the full local stack. Start required
+Redis/DARE dependencies according to the repository run skills. Existing processes
+are not captured retroactively; start them through this wrapper. Loki is not required.

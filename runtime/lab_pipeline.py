@@ -26,6 +26,8 @@ from loguru import logger
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
     ErrorFrame,
+    EndFrame,
+    CancelFrame,
     Frame,
     InputAudioRawFrame,
     InterimTranscriptionFrame,
@@ -50,6 +52,8 @@ from runtime.session_tokens import SessionClaims
 from runtime.settings import get_settings
 from runtime.stt_resilience import ResilientMistralSTTService, SttLivenessWatchdog
 from runtime.vad import _build_vad_analyzer
+from runtime.whisper_client import WhisperClient
+from runtime.speech_policy import SpeechRecoveryPolicy
 
 settings = get_settings()
 
@@ -194,7 +198,7 @@ class LabTranscriptMirror(FrameProcessor):
             self._turn_stopped_at = time.monotonic()
         elif isinstance(frame, InterimTranscriptionFrame):
             if self._watchdog is not None:
-                self._watchdog.notify_transcript(is_final=False)
+                self._watchdog.notify_transcript(is_final=False, text=frame.text or "")
             await self._emit(
                 {
                     "type": "transcript_update",
@@ -207,20 +211,25 @@ class LabTranscriptMirror(FrameProcessor):
             )
         elif isinstance(frame, TranscriptionFrame):
             if self._watchdog is not None:
-                self._watchdog.notify_transcript(is_final=True)
+                self._watchdog.notify_transcript(is_final=True, text=frame.text or "")
             latency_ms = (
                 round((time.monotonic() - self._turn_stopped_at) * 1000)
                 if self._turn_stopped_at is not None
                 else None
             )
             language = getattr(frame, "language", None)
+            batch_id = getattr(frame, "batch_id", None)
+            # A completed backup batch must not overwrite a newer live turn.
+            turn_id = 1_000_000 + batch_id if batch_id is not None else self._turn_id
+            if batch_id is not None:
+                latency_ms = round((time.monotonic() - frame.queued_at) * 1000)
             logger.info(
-                "Lab session {} final turn={} language={} latency_ms={} text={!r}",
+                "Lab session {} final turn={} language={} latency_ms={} chars={}",
                 self._session_id,
                 self._turn_id,
                 language,
                 latency_ms,
-                (frame.text or "")[:90],
+                len(frame.text or ""),
             )
             await self._emit(
                 {
@@ -228,18 +237,21 @@ class LabTranscriptMirror(FrameProcessor):
                     "role": "user",
                     "message": frame.text or "",
                     "content": frame.text or "",
-                    "turnId": self._turn_id,
+                    "turnId": turn_id,
                     "isFinal": True,
                     "language": str(language) if language else None,
                     "latencyMs": latency_ms,
                 }
             )
-            self._turn_open = False
+            if batch_id is None:
+                self._turn_open = False
+        elif isinstance(frame, ErrorFrame) and direction == FrameDirection.DOWNSTREAM:
+            await self._emit({"type": "lab_error", "error": frame.error, "fatal": bool(frame.fatal)})
 
         await self.push_frame(frame, direction)
 
 
-async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims) -> None:
+async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims, *, provider: str = "mistral") -> None:
     """Build and run the isolated STT Lab pipeline for one browser session."""
     tag_session(claims)
     logger.info(
@@ -266,7 +278,8 @@ async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims) -> No
     )
 
     stt = ResilientMistralSTTService(
-        api_key=settings.mistral_api_key,
+        api_key=settings.mistral_api_key or "unused-in-whisper-mode",
+        start_in_fallback=provider == "whisper",
         sample_rate=BROWSER_INPUT_SAMPLE_RATE,
         target_streaming_delay_ms=settings.mistral_stt_target_delay_ms,
         settings=MistralSTTService.Settings(
@@ -294,8 +307,13 @@ async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims) -> No
             sample_rate=BROWSER_INPUT_SAMPLE_RATE,
             deadline_secs=settings.stt_liveness_deadline_secs,
             event_sink=_watchdog_event,
+            policy=SpeechRecoveryPolicy(progress_timeout=settings.stt_progress_timeout_secs,
+                                        reconnect_timeout=settings.stt_reconnect_timeout_secs),
+            fallback=WhisperClient(settings.whisper_url, settings.whisper_token)
+            if settings.whisper_url and settings.whisper_token else None,
+            start_in_fallback=provider == "whisper",
         )
-        if settings.stt_liveness_deadline_secs > 0
+        if settings.stt_liveness_deadline_secs > 0 or provider == "whisper"
         else None
     )
 
@@ -339,12 +357,15 @@ async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims) -> No
                     "sessionId": claims.session_id,
                     "ttsTransport": settings.tts_transport,
                     "mode": "lab",
+                    "sttFallbackAvailable": bool(watchdog and watchdog.fallback_available),
+                    "sttProvider": "whisper" if stt.fallback_active else "mistral",
                 }
             ),
             OutputTransportMessageUrgentFrame(
                 message={
                     "type": "lab_config",
-                    "sttModel": settings.mistral_stt_model,
+                    "sttModel": "self-hosted Whisper" if stt.fallback_active else settings.mistral_stt_model,
+                    "sttProvider": "whisper" if stt.fallback_active else "mistral",
                     "gateMinVolume": settings.vad_min_volume,
                     "gateConfidence": settings.vad_confidence,
                     "livenessDeadlineSecs": settings.stt_liveness_deadline_secs,
@@ -377,6 +398,11 @@ async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims) -> No
         # client_ready with a fresh copy that cannot be dropped.
         if isinstance(message, dict) and message.get("type") == "client_ready":
             await task.queue_frames(_ready_messages())
+        elif isinstance(message, dict) and message.get("type") in {"end", "cancel"}:
+            await task.queue_frame(OutputTransportMessageUrgentFrame(message={
+                "type": "session_end_ack", "requestId": message.get("requestId"),
+            }))
+            await task.queue_frame(EndFrame() if message["type"] == "end" else CancelFrame())
 
     @transport.event_handler("on_client_disconnected")
     async def _on_disconnected(_transport, _client):

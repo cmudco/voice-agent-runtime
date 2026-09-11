@@ -74,6 +74,8 @@ class RuntimeSettings:
     stt_liveness_deadline_secs: float
     whisper_url: str
     whisper_token: str
+    stt_progress_timeout_secs: float
+    stt_reconnect_timeout_secs: float
 
 
 # Origins that must always be allowed, regardless of deployment env config.
@@ -224,4 +226,6 @@ def get_settings() -> RuntimeSettings:
         ),
         whisper_url=whisper_url,
         whisper_token=whisper_token,
+        stt_progress_timeout_secs=float(os.environ.get("VOICE_RUNTIME_STT_PROGRESS_TIMEOUT_SECS", "12")),
+        stt_reconnect_timeout_secs=float(os.environ.get("VOICE_RUNTIME_STT_RECONNECT_TIMEOUT_SECS", "12")),
     )

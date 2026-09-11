@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 import threading
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -38,12 +39,13 @@ class FallbackTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
-    async def test_two_failures_switch_and_replay_once(self):
+    async def test_one_failure_switches_and_replays_once(self):
         await self.watch._run_deadlines()
         await asyncio.sleep(0.01)
-        self.assertEqual(self.stt.replay.await_count, 2)
+        self.assertEqual(self.stt.replay.await_count, 1)
         self.stt.activate_fallback.assert_awaited_once()
-        self.stt.publish_fallback.assert_awaited_once_with("Recovered answer")
+        self.stt.publish_fallback.assert_awaited_once()
+        self.assertEqual(self.stt.publish_fallback.call_args.args[0], "Recovered answer")
         self.assertFalse(self.watch._turn_audio)
         self.watch.push_frame.assert_not_awaited()
 
@@ -51,6 +53,36 @@ class FallbackTests(unittest.IsolatedAsyncioTestCase):
         self.watch.notify_transcript(is_final=True)
         await self.watch._run_deadlines()
         self.stt.activate_fallback.assert_not_awaited()
+
+    async def test_manual_switch_is_idempotent_and_acknowledged(self):
+        await self.watch._manual_switch("request-1")
+        await self.watch._manual_switch("request-2")
+        self.stt.activate_fallback.assert_awaited_once()
+        self.stt.replay.assert_not_awaited()
+        self.assertTrue(self.watch.push_frame.call_args.args[0].message["accepted"])
+
+    async def test_cancel_before_task_wrapper_starts_closes_inner_coroutine(self):
+        async def wrapped(coroutine):
+            await coroutine
+        self.watch.create_task = lambda coroutine: asyncio.create_task(wrapped(coroutine))
+        coroutine = self.watch._watch_turn()
+        task = self.watch._spawn(coroutine)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(inspect.getcoroutinestate(coroutine), inspect.CORO_CLOSED)
+
+    async def test_missing_backup_does_not_cancel_watchdog(self):
+        self.watch._fallback = None
+        self.watch._cancel_watch = AsyncMock()
+        await self.watch._manual_switch("request-1")
+        self.watch._cancel_watch.assert_not_awaited()
+        self.assertFalse(self.watch.push_frame.call_args.args[0].message["accepted"])
+
+    async def test_close_failure_still_starts_backup(self):
+        self.stt.activate_fallback.side_effect = TimeoutError()
+        self.assertTrue(await self.watch.switch_to_fallback(reason="test"))
+        await asyncio.sleep(0.01)
+        self.stt.publish_fallback.assert_awaited_once()
 
     async def test_reconnect_recovery_does_not_switch(self):
         async def replay(audio):

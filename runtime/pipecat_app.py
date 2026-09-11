@@ -13,7 +13,7 @@ Start locally with:
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -57,6 +57,7 @@ class WebRTCOfferRequest(BaseModel):
     pc_id: str | None = Field(default=None, alias="pcId")
     restart_pc: bool | None = Field(default=None, alias="restartPc")
     request_data: dict[str, Any] | None = Field(default=None, alias="requestData")
+    stt_provider: Literal["mistral", "whisper"] = Field(default="mistral", alias="sttProvider")
 
 
 def _validate_claims(session_id: str, token: str):
@@ -90,6 +91,12 @@ async def create_webrtc_session(
     """Authenticate, accept a browser WebRTC offer, and start the Pipecat task."""
     claims = _validate_claims(session_id, token)
 
+    if offer.stt_provider == "whisper":
+        if claims.mode != "lab":
+            raise HTTPException(status_code=400, detail="Provider selection is available only in the STT lab")
+        if not settings.whisper_url or not settings.whisper_token:
+            raise HTTPException(status_code=503, detail="Self-hosted Whisper is not configured on this runtime")
+
     if claims.mode == "lab":
         # STT Lab sessions are self-contained: no exam context to fetch, no
         # Django callbacks — just mic → STT with everything mirrored back.
@@ -106,7 +113,7 @@ async def create_webrtc_session(
     async def _start_session(webrtc_connection):
         logger.info("Started Pipecat WebRTC voice session %s (mode=%s)", session_id, claims.mode)
         if claims.mode == "lab":
-            asyncio.create_task(run_lab_webrtc_session(webrtc_connection, claims))
+            asyncio.create_task(run_lab_webrtc_session(webrtc_connection, claims, provider=offer.stt_provider))
         else:
             asyncio.create_task(run_pipecat_webrtc_session(webrtc_connection, claims, context))
 

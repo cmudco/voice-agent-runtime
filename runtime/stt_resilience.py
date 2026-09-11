@@ -1,22 +1,14 @@
-"""Liveness watchdog + replay recovery for the Mistral realtime STT socket.
+"""Bounded recognition recovery based on speech/transcript progress.
 
-Mistral's realtime gateway sometimes hands out dud sessions: the websocket
-connects, ``Session created`` arrives, audio streams up — and no transcription
-ever comes back, because the gateway's *internal* hop to the Voxtral backend
-is broken (it eventually dies with ``1011 Upstream connection error``, long
-after the student gave up). Pipecat's ``MistralSTTService`` only reconnects
-when the socket is *closed*, so a mute-but-open socket silently eats every
-turn of a session.
-
-The inherent fix implemented here: never trust the socket, trust the
-transcript. If VAD confirmed the student spoke, a transcript MUST arrive
-within a deadline — otherwise the socket is presumed dead, is rebuilt, and
-the student's buffered speech is replayed into the fresh connection. Speech
-is kept until it has been transcribed, so a dud session degrades to a few
-seconds of extra latency instead of a dead call.
+An open socket does not establish that recognition is working. Conversely,
+VAD can classify noise as speech, so lack of text is a recovery heuristic,
+not proof of an upstream fault. One bounded replay precedes optional Whisper.
+Only retained audio can be recovered; failures remain explicit to the client.
 """
 
 import asyncio
+import time
+from dataclasses import dataclass
 from collections import deque
 from typing import AsyncGenerator
 
@@ -27,6 +19,9 @@ from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
     InputAudioRawFrame,
+    InputTransportMessageFrame,
+    OutputTransportMessageUrgentFrame,
+    StartFrame,
     InterimTranscriptionFrame,
     TranscriptionFrame,
     VADUserStartedSpeakingFrame,
@@ -35,6 +30,13 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.mistral.stt import MistralSTTService
 from pipecat.utils.time import time_now_iso8601
+from runtime.speech_policy import SpeechProgress, SpeechRecoveryPolicy
+
+
+@dataclass
+class WhisperTranscriptionFrame(TranscriptionFrame):
+    batch_id: int = 0
+    queued_at: float = 0.0
 
 
 class _TimeoutGuardedConnection:
@@ -116,20 +118,21 @@ class ResilientMistralSTTService(MistralSTTService):
     reconnect and re-triggering the service's own lazy connect mid-rebuild.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, start_in_fallback=False, **kwargs):
         super().__init__(*args, **kwargs)
         self._replay_lock = asyncio.Lock()
         self._session_over = False
-        self.fallback_active = False
+        self.fallback_active = start_in_fallback
 
     async def activate_fallback(self):
         self.fallback_active = True
         async with self._replay_lock:
             await self._disconnect()
 
-    async def publish_fallback(self, text: str):
+    async def publish_fallback(self, text: str, *, batch_id: int = 0, queued_at: float = 0.0):
         if not self._session_over:
-            await super().push_frame(TranscriptionFrame(text, self._user_id, time_now_iso8601()))
+            await super().push_frame(WhisperTranscriptionFrame(text, self._user_id, time_now_iso8601(),
+                                                              batch_id=batch_id, queued_at=queued_at))
 
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
         # Late upstream results must not duplicate a recovered Whisper turn.
@@ -230,6 +233,8 @@ class SttLivenessWatchdog(FrameProcessor):
         deadline_secs: float,
         event_sink=None,
         fallback=None,
+        policy: SpeechRecoveryPolicy | None = None,
+        start_in_fallback: bool = False,
     ):
         super().__init__()
         self._session_id = session_id
@@ -246,30 +251,52 @@ class SttLivenessWatchdog(FrameProcessor):
         self._transcript_event = asyncio.Event()
         self._watch_task = None
         self._fallback = fallback
-        self._fallback_active = False
+        self._fallback_active = start_in_fallback
         self._fallback_queue = asyncio.Queue(maxsize=2)
         self._fallback_task = None
         self._speaking = False
         self._overflow = False
         self._closed = False
+        self._policy = policy or SpeechRecoveryPolicy()
+        self._progress = SpeechProgress(self._policy)
+        self._progress_task = None
+        self._switch_task = None
+        self._switch_lock = asyncio.Lock()
+        self._batch_id = 0
 
-    def notify_transcript(self, *, is_final: bool) -> None:
+    def notify_transcript(self, *, is_final: bool, text: str | None = None) -> None:
         """Called by UserTranscriptProcessor for every interim/final."""
-        if self._fallback_active:
+        if self._fallback_active or (text is not None and not text.strip()):
             return  # A finished batch must not erase the next, live turn.
-        self._transcript_event.set()
+        progressed = self._progress.transcript(time.monotonic(), text or "")
+        if progressed or is_final or text is None:
+            self._transcript_event.set()
         if is_final:
             # Turn concluded successfully; buffered speech served its purpose.
-            self._awaiting_transcript = False
+            self._awaiting_transcript = self._speaking
             self._turn_audio = bytearray()
+            self._overflow = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, InputAudioRawFrame):
+        if isinstance(frame, StartFrame):
+            if self._fallback_active:
+                self._fallback_task = self._spawn(self._consume_fallback())
+            else:
+                self._progress_task = self._spawn(self._monitor_progress())
+        elif isinstance(frame, InputTransportMessageFrame) and isinstance(frame.message, dict) and frame.message.get("type") == "stt_switch":
+            request_id = frame.message.get("requestId")
+            if isinstance(request_id, str) and len(request_id) <= 128:
+                if self._switch_task is None or self._switch_task.done():
+                    self._switch_task = self._spawn(self._manual_switch(request_id))
+            return
+        elif isinstance(frame, InputAudioRawFrame):
+            self._progress.audio(time.monotonic(), len(frame.audio) / self._bytes_per_sec, self._speaking)
             self._buffer_audio(frame.audio)
         elif isinstance(frame, VADUserStartedSpeakingFrame):
             self._speaking = True
+            self._progress.begin(time.monotonic(), fresh=not self._awaiting_transcript)
             self._on_turn_started()
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
             self._speaking = False
@@ -277,6 +304,9 @@ class SttLivenessWatchdog(FrameProcessor):
         elif isinstance(frame, (EndFrame, CancelFrame)):
             self._closed = True
             await self._cancel_watch()
+            for task in (self._progress_task, self._switch_task):
+                if task is not None:
+                    await self.cancel_task(task)
             if self._fallback_task is not None:
                 await self.cancel_task(self._fallback_task)
                 self._fallback_task = None
@@ -286,6 +316,58 @@ class SttLivenessWatchdog(FrameProcessor):
                 self._fallback_queue.get_nowait()
 
         await self.push_frame(frame, direction)
+
+    @property
+    def fallback_available(self) -> bool:
+        return self._fallback is not None
+
+    def _spawn(self, coroutine):
+        # Pipecat wraps the coroutine in its task manager. If cancelled before
+        # that wrapper starts, close the still-unawaited inner coroutine too.
+        task = self.create_task(coroutine)
+        task.add_done_callback(lambda _: coroutine.close())
+        return task
+
+    async def _monitor_progress(self):
+        while not self._closed and not self._fallback_active:
+            await asyncio.sleep(0.5)
+            switching = self._switch_task is not None and not self._switch_task.done()
+            if self._progress.stalled(time.monotonic()) and self._watch_task is None and not switching:
+                self._transcript_event.clear()
+                self._watch_task = self._spawn(self._watch_turn(skip_initial_wait=True))
+
+    async def _manual_switch(self, request_id: str):
+        if self.fallback_available:
+            await self._cancel_watch()
+        accepted = await self.switch_to_fallback(reason="user_requested")
+        if not self._closed:
+            await self.push_frame(OutputTransportMessageUrgentFrame(message={
+                "type": "stt_switch_ack", "requestId": request_id,
+                "accepted": accepted,
+                "provider": "whisper" if accepted else "mistral",
+            }))
+
+    async def switch_to_fallback(self, *, reason: str) -> bool:
+        async with self._switch_lock:
+            if self._closed or self._fallback is None:
+                return False
+            if self._fallback_active:
+                return True
+            self._fallback_active = True
+            # Mark before awaiting so late Mistral results cannot race the switch.
+            try:
+                async with asyncio.timeout(5):
+                    await self._stt.activate_fallback()
+            except Exception:
+                # The service's fallback flag already blocks reconnects/results.
+                await self._emit_event("upstream_close_timeout")
+            if self._closed:
+                return False
+            await self._emit_event("fallback_started", reason=reason, provider="whisper")
+            self._fallback_task = self._spawn(self._consume_fallback())
+            if not self._speaking:
+                self._queue_fallback()
+            return True
 
     def _buffer_audio(self, audio: bytes) -> None:
         self._pre_roll.append(audio)
@@ -315,7 +397,7 @@ class SttLivenessWatchdog(FrameProcessor):
         if not self._awaiting_transcript or self._transcript_event.is_set():
             return
         if self._watch_task is None:
-            self._watch_task = self.create_task(self._watch_turn())
+            self._watch_task = self._spawn(self._watch_turn())
 
     def _queue_fallback(self):
         if not self._awaiting_transcript or self._closed:
@@ -327,9 +409,9 @@ class SttLivenessWatchdog(FrameProcessor):
         self._turn_audio.clear()
         self._overflow = False
         try:
-            self._fallback_queue.put_nowait((audio, overflow))
+            self._fallback_queue.put_nowait((audio, overflow, time.monotonic()))
         except asyncio.QueueFull:
-            self.create_task(self._fallback_error("overloaded"))
+            self._spawn(self._fallback_error("overloaded"))
 
     async def _fallback_error(self, reason):
         if self._closed:
@@ -342,18 +424,22 @@ class SttLivenessWatchdog(FrameProcessor):
 
     async def _consume_fallback(self):
         while not self._closed:
-            audio, overflow = await self._fallback_queue.get()
+            audio, overflow, queued_at = await self._fallback_queue.get()
             if overflow:
                 await self._fallback_error("buffer_limit")
                 continue
             try:
-                await self._emit_event("fallback_processing")
+                self._batch_id += 1
+                started = time.monotonic()
+                await self._emit_event("fallback_processing", batchId=self._batch_id)
                 text = await self._fallback.transcribe(audio)
                 if self._closed:
                     return
                 if text:
-                    await self._stt.publish_fallback(text)
-                    await self._emit_event("fallback_recovered")
+                    await self._stt.publish_fallback(text, batch_id=self._batch_id, queued_at=queued_at)
+                    await self._emit_event("fallback_recovered", batchId=self._batch_id,
+                                           recognitionMs=round((time.monotonic() - started) * 1000),
+                                           audioSeconds=round(len(audio) / self._bytes_per_sec, 2))
                 else:
                     await self._fallback_error("no_speech")
             except asyncio.CancelledError:
@@ -367,16 +453,11 @@ class SttLivenessWatchdog(FrameProcessor):
             task, self._watch_task = self._watch_task, None
             await self.cancel_task(task)
 
-    async def _watch_turn(self) -> None:
+    async def _watch_turn(self, skip_initial_wait: bool = False) -> None:
         try:
-            await self._run_deadlines()
+            await self._run_deadlines(skip_initial_wait=skip_initial_wait)
         finally:
             self._watch_task = None
-
-    # Consecutive dud sockets are common when Mistral degrades (observed on
-    # dev: back-to-back duds killed two sessions in a row), so one rebuild is
-    # not enough — each attempt gets a brand-new socket and a fresh draw.
-    MAX_REBUILD_ATTEMPTS = 2
 
     async def _emit_event(self, event: str, **fields) -> None:
         if self._event_sink is None:
@@ -390,42 +471,40 @@ class SttLivenessWatchdog(FrameProcessor):
                 exc,
             )
 
-    async def _run_deadlines(self) -> None:
-        if await self._transcript_within(self._deadline_secs):
+    async def _run_deadlines(self, skip_initial_wait: bool = False) -> None:
+        if self._closed or self._fallback_active:
             return
-        for attempt in range(1, self.MAX_REBUILD_ATTEMPTS + 1):
+        if not skip_initial_wait and await self._transcript_within(self._deadline_secs):
+            return
+        for attempt in range(1, self._policy.reconnect_attempts + 1):
             if self._closed or self._transcript_event.is_set():
                 return
             # Re-read each attempt: the student may keep talking into the
             # stall and that speech belongs in the replay too.
             buffered = bytes(self._turn_audio)
             logger.warning(
-                "Pipecat session {} STT stalled: no transcript for a VAD-closed "
-                "turn — rebuild attempt {}/{}, replaying {:.1f}s of speech",
+                "Pipecat session {} STT stalled: no transcript progress "
+                "— rebuild attempt {}/{}, replaying {:.1f}s of buffered audio",
                 self._session_id,
                 attempt,
-                self.MAX_REBUILD_ATTEMPTS,
+                self._policy.reconnect_attempts,
                 len(buffered) / self._bytes_per_sec,
             )
             await self._emit_event(
                 "stalled",
                 attempt=attempt,
-                maxAttempts=self.MAX_REBUILD_ATTEMPTS,
+                maxAttempts=self._policy.reconnect_attempts,
                 bufferedSecs=round(len(buffered) / self._bytes_per_sec, 1),
             )
             try:
-                async with asyncio.timeout(15):
+                # One deadline covers connection + replay + recognition, rather
+                # than waiting another clip-length interval after a slow replay.
+                async with asyncio.timeout(self._policy.reconnect_timeout):
                     replayed = await self._stt.replay(buffered)
+                    recovered = replayed and await self._transcript_within(self._policy.reconnect_timeout)
             except Exception:  # Provider failures must not skip the backup path.
-                replayed = False
-            # The realtime endpoint transcribes a replayed clip at roughly
-            # stream pace, so the post-replay wait must scale with the clip
-            # length — a fixed deadline made a good rebuilt socket look dead
-            # (observed on dev: 6.6s replay, 4s deadline).
-            replay_deadline = (
-                self._deadline_secs + len(buffered) / self._bytes_per_sec
-            )
-            if replayed and await self._transcript_within(replay_deadline):
+                recovered = False
+            if recovered:
                 logger.info(
                     "Pipecat session {} STT replay recovered the turn "
                     "(attempt {})",
@@ -437,20 +516,15 @@ class SttLivenessWatchdog(FrameProcessor):
         if self._closed or self._transcript_event.is_set():
             return
         if self._fallback is not None:
-            self._fallback_active = True
-            await self._stt.activate_fallback()
-            await self._emit_event("fallback_started")
-            self._fallback_task = self.create_task(self._consume_fallback())
-            if not self._speaking:
-                self._queue_fallback()
+            await self.switch_to_fallback(reason="recognition_stalled")
             return
         logger.error(
             "Pipecat session {} STT still silent after {} rebuilds — "
             "surfacing error",
             self._session_id,
-            self.MAX_REBUILD_ATTEMPTS,
+            self._policy.reconnect_attempts,
         )
-        await self._emit_event("failed", attempts=self.MAX_REBUILD_ATTEMPTS)
+        await self._emit_event("failed", attempts=self._policy.reconnect_attempts)
         await self.push_frame(
             ErrorFrame(
                 error="Speech service stalled — please repeat your answer.",

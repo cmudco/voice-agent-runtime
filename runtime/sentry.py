@@ -8,6 +8,7 @@ exact session / agent / backend.
 """
 
 from urllib.parse import urlsplit
+import os
 
 import sentry_sdk
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
@@ -20,13 +21,17 @@ from runtime.settings import RuntimeSettings
 
 def init_sentry(settings: RuntimeSettings) -> bool:
     """Initialise Sentry; returns False (no-op) when no DSN is configured."""
-    if not settings.sentry_dsn:
+    local = settings.sentry_environment in {"development", "local", "test"}
+    dsn = os.environ.get("LOCAL_SENTRY_DSN", "") if local else settings.sentry_dsn
+    if not dsn:
         return False
     sentry_sdk.init(
-        dsn=settings.sentry_dsn,
+        dsn=dsn,
         environment=settings.sentry_environment,
-        traces_sample_rate=settings.sentry_traces_sample_rate,
+        traces_sample_rate=0 if local else settings.sentry_traces_sample_rate,
         send_default_pii=False,
+        include_local_variables=False,
+        before_send=_local_event if local else None,
         integrations=[
             StarletteIntegration(),
             FastApiIntegration(),
@@ -61,8 +66,24 @@ def tag_session(claims, backend_url: str = "") -> None:
 
 
 def capture_browser_error(error: str, *, fatal: bool) -> None:
-    """Report an error the student actually saw in the browser."""
+    """Report an error sent toward the browser; receipt/rendering is not proven."""
     sentry_sdk.capture_message(
         f"Voice session error surfaced to browser: {error}",
         level="fatal" if fatal else "error",
     )
+
+
+def _local_event(event, hint):
+    """Local testing exports exception locations, not payloads or student content."""
+    safe = {key: event[key] for key in ("event_id", "timestamp", "level", "platform", "environment", "release") if key in event}
+    values = []
+    for exception in event.get("exception", {}).get("values", []):
+        frames = [{key: frame[key] for key in ("filename", "function", "lineno", "module") if key in frame}
+                  for frame in exception.get("stacktrace", {}).get("frames", [])]
+        values.append({"type": exception.get("type", "Error"), "value": "Local error (message omitted)",
+                       "stacktrace": {"frames": frames}})
+    if values:
+        safe["exception"] = {"values": values}
+    else:
+        safe["message"] = "Local runtime error log (message omitted)"
+    return safe

@@ -50,6 +50,8 @@ from runtime.session_tokens import SessionClaims
 from runtime.settings import get_settings
 from runtime.stt_resilience import ResilientMistralSTTService, SttLivenessWatchdog
 from runtime.whisper_client import WhisperClient
+from runtime.speech_policy import SpeechRecoveryPolicy
+from runtime.voice_stage import VoiceStageTracker, VoiceStageTap
 from runtime.text_utils import (
     _build_system_prompt,
     _is_english_session,
@@ -114,7 +116,14 @@ async def _run_transport_session(
             language=Language.EN if _is_english_session(context.language) else None,
         ),
     )
+    async def stage_event(event):
+        recorder.health_event("stage_" + event["voiceStage"])
+        await stt.push_frame(OutputTransportMessageUrgentFrame(message=event))
+
+    stage_tracker = VoiceStageTracker(stage_event)
+
     async def stt_event(event):
+        await stage_tracker.recognition_event(event["event"])
         recorder.health_event("stt_" + event["event"])
         await stt.push_frame(OutputTransportMessageUrgentFrame(message={
             "type": "stt_status", **event,
@@ -127,6 +136,8 @@ async def _run_transport_session(
             sample_rate=BROWSER_INPUT_SAMPLE_RATE,
             deadline_secs=settings.stt_liveness_deadline_secs,
             event_sink=stt_event,
+            policy=SpeechRecoveryPolicy(progress_timeout=settings.stt_progress_timeout_secs,
+                                        reconnect_timeout=settings.stt_reconnect_timeout_secs),
             fallback=WhisperClient(settings.whisper_url, settings.whisper_token)
             if settings.whisper_url and settings.whisper_token else None,
         )
@@ -277,13 +288,16 @@ async def _run_transport_session(
         transport.input(),
         client_control,
         *([stt_watchdog] if stt_watchdog else []),
+        VoiceStageTap(stage_tracker, input_side=True),
         stt,
         user_transcript,
         RecoveryInputProcessor(recovery),
         aggregators.user(),
         ElapsedTimestampProcessor(recorder),
         RecoveryContextProcessor(recovery),
+        VoiceStageTap(stage_tracker),
         llm,
+        VoiceStageTap(stage_tracker),
         tts,
         browser_events,
         transport.output(),
@@ -372,6 +386,8 @@ async def _run_transport_session(
                 # Tells the browser how to play agent audio: "webrtc" (play the
                 # live WebRTC track) or "http" (fetch pre-rendered WAVs).
                 "ttsTransport": settings.tts_transport,
+                "sttFallbackAvailable": bool(stt_watchdog and stt_watchdog.fallback_available),
+                "sttProvider": "whisper" if stt.fallback_active else "mistral",
             }
         )
 

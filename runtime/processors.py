@@ -38,6 +38,7 @@ from loguru import logger
 from runtime.recorder import SessionRecorder
 from runtime.text_utils import _clean_transcript_text, _normalize_transcript_text
 from runtime.sentry import capture_browser_error
+from runtime.voice_stage import VoiceStage
 
 
 RUNTIME_DEBUG_DIR = Path("/tmp/voice-runtime-audio")
@@ -454,10 +455,10 @@ class UserTranscriptProcessor(FrameProcessor):
             self._ensure_user_turn_id()
 
         elif isinstance(frame, InterimTranscriptionFrame):
-            # Any STT response — even empty — proves the socket is alive, so
-            # report it before the text checks (see SttLivenessWatchdog).
+            # Report recognition progress; the watchdog ignores empty or
+            # repeated interim text rather than mistaking it for recovery.
             if self._liveness_watchdog is not None:
-                self._liveness_watchdog.notify_transcript(is_final=False)
+                self._liveness_watchdog.notify_transcript(is_final=False, text=frame.text or "")
             text = _clean_transcript_text(frame.text or "")
             if text:
                 frame = replace(frame, text=text)
@@ -465,7 +466,7 @@ class UserTranscriptProcessor(FrameProcessor):
 
         elif isinstance(frame, TranscriptionFrame):
             if self._liveness_watchdog is not None:
-                self._liveness_watchdog.notify_transcript(is_final=True)
+                self._liveness_watchdog.notify_transcript(is_final=True, text=frame.text or "")
             text = _clean_transcript_text(frame.text or "")
             if text:
                 language = getattr(frame, "language", None)
@@ -489,6 +490,7 @@ class ClientControlProcessor(FrameProcessor):
         super().__init__()
         self._recorder = recorder
         self._client_ended = False
+        self._last_stage_sequence = 0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -503,6 +505,14 @@ class ClientControlProcessor(FrameProcessor):
         if isinstance(frame, InputTransportMessageFrame):
             message = frame.message if isinstance(frame.message, dict) else {}
             message_type = message.get("type")
+            if message_type == "voice_stage_seen":
+                sequence = message.get("sequence")
+                if (isinstance(message.get("voiceStage"), str)
+                    and message["voiceStage"] in {stage.value for stage in VoiceStage}
+                    and type(sequence) is int and sequence > self._last_stage_sequence):
+                    self._last_stage_sequence = sequence
+                    self._recorder.health_event("stage_seen_" + message["voiceStage"])
+                return
             if message_type == "client_exit":
                 self._recorder.record_exit(message.get("reason", "client_cancelled"))
                 return

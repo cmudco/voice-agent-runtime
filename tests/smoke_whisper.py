@@ -11,7 +11,7 @@ import wave
 from unittest.mock import AsyncMock
 
 from pipecat.frames.frames import (
-    EndFrame, InputAudioRawFrame, TranscriptionFrame,
+    EndFrame, InputAudioRawFrame, InputTransportMessageFrame, TranscriptionFrame,
     VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
@@ -23,7 +23,8 @@ from runtime.stt_resilience import ResilientMistralSTTService, SttLivenessWatchd
 from runtime.whisper_client import WhisperClient
 
 
-async def main(path):
+async def main(path, mode="auto"):
+    assert mode in {"auto", "manual", "direct"}
     with wave.open(path) as wav:
         assert wav.getframerate() == 16000 and wav.getnchannels() == 1 and wav.getsampwidth() == 2
         audio = wav.readframes(wav.getnframes())
@@ -38,13 +39,15 @@ async def main(path):
                 done.set()
             await self.push_frame(frame, direction)
 
-    stt = ResilientMistralSTTService(api_key="synthetic-test-no-upstream", sample_rate=16000)
+    stt = ResilientMistralSTTService(api_key="synthetic-test-no-upstream", sample_rate=16000,
+                                     start_in_fallback=mode == "direct")
     stt._connect = AsyncMock()
     stt._disconnect = AsyncMock()
     stt.replay = AsyncMock(return_value=False)
     watchdog = SttLivenessWatchdog(
         "synthetic-test", stt, sample_rate=16000, deadline_secs=0.01,
         fallback=WhisperClient("http://127.0.0.1:8011", os.environ["VOICE_RUNTIME_WHISPER_TOKEN"]),
+        start_in_fallback=mode == "direct",
     )
     task = PipelineTask(Pipeline([watchdog, stt, Capture()]),
                         params=PipelineParams(audio_in_sample_rate=16000),
@@ -52,14 +55,16 @@ async def main(path):
     runner = asyncio.create_task(PipelineRunner(handle_sigint=False).run(task))
     try:
         await task.queue_frames([
+            *([InputTransportMessageFrame(message={"type": "stt_switch", "requestId": "synthetic"})]
+              if mode == "manual" else []),
             VADUserStartedSpeakingFrame(),
             InputAudioRawFrame(audio=audio, sample_rate=16000, num_channels=1),
             VADUserStoppedSpeakingFrame(),
         ])
         await asyncio.wait_for(done.wait(), timeout=45)
-        assert stt.replay.await_count == 2
+        assert stt.replay.await_count == (1 if mode == "auto" else 0)
         assert len(results) == 1 and "translation" in results[0].lower(), results
-        print("PASS: two failed recoveries -> local Whisper -> one recovered transcript")
+        print(f"PASS: {mode} -> local Whisper -> one recovered transcript")
         print(results[0])  # Synthetic fixture only, never run on student recordings.
         done.clear()
         await stt.push_frame(TranscriptionFrame("late upstream duplicate", "", ""))
@@ -70,7 +75,7 @@ async def main(path):
         ])
         await asyncio.wait_for(done.wait(), timeout=45)
         assert len(results) == 2 and "translation" in results[1].lower(), results
-        assert stt.replay.await_count == 2
+        assert stt.replay.await_count == (1 if mode == "auto" else 0)
         print("PASS: next turn stays on Whisper; late upstream transcript is ignored")
     finally:
         await task.queue_frame(EndFrame())
@@ -78,4 +83,4 @@ async def main(path):
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1]))
+    asyncio.run(main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "auto"))
