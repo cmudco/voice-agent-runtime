@@ -73,3 +73,28 @@ class StageTests(unittest.IsolatedAsyncioTestCase):
         tracker.closed = True
         await tracker.set(VoiceStage.LISTENING)
         self.assertEqual(tracker.stage, VoiceStage.RECOVERING)
+
+    async def test_steady_state_backup_transcription_is_not_recovery(self):
+        tracker = VoiceStageTracker(AsyncMock())
+        await tracker.recognition_event('fallback_started')
+        self.assertEqual(tracker.stage, VoiceStage.RECOVERING)
+        await tracker.recognition_event('fallback_processing')
+        self.assertEqual(tracker.stage, VoiceStage.TRANSCRIBING)
+        self.assertFalse(tracker.recovering)
+        tracker.response_pending = True
+        await tracker.recognition_event('fallback_recovered')
+        self.assertEqual(tracker.stage, VoiceStage.THINKING)
+        # Later turns on the backup: transcribing, never "recovering".
+        await tracker.set(VoiceStage.LISTENING)
+        await tracker.recognition_event('fallback_processing')
+        self.assertEqual(tracker.stage, VoiceStage.TRANSCRIBING)
+
+
+class DeadlineTests(unittest.TestCase):
+    def test_reconnect_deadline_scales_with_clip_and_is_capped(self):
+        policy = SpeechRecoveryPolicy(reconnect_timeout=12, reconnect_cap=30)
+        self.assertEqual(policy.reconnect_deadline(0), 12)
+        self.assertEqual(policy.reconnect_deadline(6.6), 18.6)
+        self.assertEqual(policy.reconnect_deadline(90), 30)
+        with self.assertRaises(ValueError):
+            SpeechRecoveryPolicy(reconnect_timeout=12, reconnect_cap=5)

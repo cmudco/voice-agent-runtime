@@ -8,13 +8,21 @@ class SpeechRecoveryPolicy:
     progress_timeout: float = 12.0
     minimum_speech: float = 2.0
     reconnect_timeout: float = 12.0
+    reconnect_cap: float = 30.0
     reconnect_attempts: int = 1
 
     def __post_init__(self):
         if min(self.progress_timeout, self.minimum_speech, self.reconnect_timeout) <= 0:
             raise ValueError("Speech recovery deadlines must be positive")
+        if self.reconnect_cap < self.reconnect_timeout:
+            raise ValueError("reconnect_cap must not be below reconnect_timeout")
         if self.reconnect_attempts != 1:
             raise ValueError("Exactly one reconnect is supported before backup")
+
+    def reconnect_deadline(self, replayed_seconds: float) -> float:
+        # The realtime endpoint transcribes a replay at roughly stream pace, so
+        # a fixed deadline judges long answers by the wrong clock.
+        return min(self.reconnect_timeout + max(0.0, replayed_seconds), self.reconnect_cap)
 
 
 class SpeechProgress:

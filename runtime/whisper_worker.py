@@ -7,12 +7,14 @@ One inference at a time; admission is fail-fast rather than an unbounded queue.
 import asyncio
 import hmac
 import os
+import re
 from contextlib import asynccontextmanager
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 
 MAX_AUDIO_BYTES = 120 * 16000 * 2
+LANGUAGE_RE = re.compile(r"^[a-z]{2,3}$")
 
 
 def create_app(model_factory=None, token=None):
@@ -49,6 +51,9 @@ def create_app(model_factory=None, token=None):
             request.headers.get("authorization", ""), "Bearer " + token
         ):
             raise HTTPException(401, "Unauthorized")
+        language = request.query_params.get("language")
+        if language is not None and not LANGUAGE_RE.fullmatch(language):
+            raise HTTPException(400, "Invalid language")
         if app.state.busy:
             raise HTTPException(503, "Whisper worker busy")
         app.state.busy = True
@@ -65,9 +70,11 @@ def create_app(model_factory=None, token=None):
 
             def run():
                 samples = np.frombuffer(audio, dtype="<i2").astype(np.float32) / 32768
+                # Auto-detection on a short clip can pick the wrong language and
+                # invent text in it; the session already knows its language.
                 segments, _ = app.state.model.transcribe(
                     samples, beam_size=1, vad_filter=True,
-                    condition_on_previous_text=False,
+                    condition_on_previous_text=False, language=language,
                 )
                 return " ".join(segment.text.strip() for segment in segments).strip()
 

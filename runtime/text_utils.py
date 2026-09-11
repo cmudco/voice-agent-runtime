@@ -26,10 +26,10 @@ RUNTIME_RULES = (
     "describe it in spoken words and avoid raw punctuation-heavy snippets unless "
     "the student explicitly asks for exact syntax. Say symbol names in English "
     "words when needed, such as eta or alpha. You may be interrupted mid-sentence; "
-    "if so, stop and listen. Every conversation message is prefixed with the time "
-    "elapsed since the exam started, formatted like [1:20] (user) or [1:25] (agent). "
-    "Use these timestamps to pace the exam and to answer questions about how long "
-    "it has been running. Never write such a prefix in your own replies."
+    "if so, stop and listen. A separate runtime timing note provides elapsed "
+    "seconds and a recorded transcript timeline. Use it for pacing and questions "
+    "about elapsed time. Output only the spoken reply, never timestamps, speaker "
+    "labels, or runtime metadata."
 )
 
 DEVANAGARI_CONSONANTS = {

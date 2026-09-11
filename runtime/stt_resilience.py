@@ -129,6 +129,10 @@ class ResilientMistralSTTService(MistralSTTService):
         async with self._replay_lock:
             await self._disconnect()
 
+    def deactivate_fallback(self):
+        # The next audio chunk lazily rebuilds the socket through run_stt.
+        self.fallback_active = False
+
     async def publish_fallback(self, text: str, *, batch_id: int = 0, queued_at: float = 0.0):
         if not self._session_over:
             await super().push_frame(WhisperTranscriptionFrame(text, self._user_id, time_now_iso8601(),
@@ -263,6 +267,11 @@ class SttLivenessWatchdog(FrameProcessor):
         self._switch_task = None
         self._switch_lock = asyncio.Lock()
         self._batch_id = 0
+        # An automatic switch is provisional until the backup hears words:
+        # VAD noise can look like a stall, and a session must not be
+        # downgraded for the rest of the exam on that evidence alone.
+        self._probation = False
+        self._probation_used = False
 
     def notify_transcript(self, *, is_final: bool, text: str | None = None) -> None:
         """Called by UserTranscriptProcessor for every interim/final."""
@@ -337,7 +346,11 @@ class SttLivenessWatchdog(FrameProcessor):
                 self._watch_task = self._spawn(self._watch_turn(skip_initial_wait=True))
 
     async def _manual_switch(self, request_id: str):
-        if self.fallback_available:
+        # Abort a pending replay so the user is not held to the reconnect
+        # deadline — unless the watchdog is already inside switch_to_fallback,
+        # where a cancel would strand the session flagged as switched with no
+        # consumer. That call holds the switch lock; let it finish and join it.
+        if self.fallback_available and not self._switch_lock.locked():
             await self._cancel_watch()
         accepted = await self.switch_to_fallback(reason="user_requested")
         if not self._closed:
@@ -352,9 +365,14 @@ class SttLivenessWatchdog(FrameProcessor):
             if self._closed or self._fallback is None:
                 return False
             if self._fallback_active:
+                if reason == "user_requested":
+                    self._probation = False
+                self._ensure_consumer()
                 return True
+            # Flag and consumer are set before any await: a cancellation
+            # mid-switch must not leave turns queueing with nobody to drain.
             self._fallback_active = True
-            # Mark before awaiting so late Mistral results cannot race the switch.
+            self._ensure_consumer()
             try:
                 async with asyncio.timeout(5):
                     await self._stt.activate_fallback()
@@ -363,11 +381,32 @@ class SttLivenessWatchdog(FrameProcessor):
                 await self._emit_event("upstream_close_timeout")
             if self._closed:
                 return False
-            await self._emit_event("fallback_started", reason=reason, provider="whisper")
-            self._fallback_task = self._spawn(self._consume_fallback())
+            if reason == "recognition_stalled" and not self._probation_used:
+                self._probation = self._probation_used = True
+            else:
+                self._probation = False
+            await self._emit_event("fallback_started", reason=reason, provider="whisper",
+                                   provisional=self._probation)
             if not self._speaking:
                 self._queue_fallback()
             return True
+
+    async def _revert_to_primary(self) -> None:
+        """First backup batch after an automatic switch heard nothing: treat the
+        stall as noise and hand recognition back to Mistral."""
+        self._probation = False
+        self._fallback_active = False
+        self._stt.deactivate_fallback()
+        self._progress = SpeechProgress(self._policy)
+        await self._emit_event("fallback_reverted", provider="mistral")
+        if self._progress_task is None or self._progress_task.done():
+            self._progress_task = self._spawn(self._monitor_progress())
+
+    def _ensure_consumer(self) -> None:
+        if self._closed:
+            return
+        if self._fallback_task is None or self._fallback_task.done():
+            self._fallback_task = self._spawn(self._consume_fallback())
 
     def _buffer_audio(self, audio: bytes) -> None:
         self._pre_roll.append(audio)
@@ -436,11 +475,19 @@ class SttLivenessWatchdog(FrameProcessor):
                 if self._closed:
                     return
                 if text:
+                    self._probation = False
                     await self._stt.publish_fallback(text, batch_id=self._batch_id, queued_at=queued_at)
                     await self._emit_event("fallback_recovered", batchId=self._batch_id,
                                            recognitionMs=round((time.monotonic() - started) * 1000),
                                            audioSeconds=round(len(audio) / self._bytes_per_sec, 2))
+                elif (self._probation and self._fallback_queue.empty()
+                      and not self._awaiting_transcript and not self._speaking):
+                    await self._revert_to_primary()
+                    return
                 else:
+                    # An empty earlier batch must not abandon newer speech or
+                    # override the user's explicit choice of recognition service.
+                    self._probation = False
                     await self._fallback_error("no_speech")
             except asyncio.CancelledError:
                 raise
@@ -496,12 +543,13 @@ class SttLivenessWatchdog(FrameProcessor):
                 maxAttempts=self._policy.reconnect_attempts,
                 bufferedSecs=round(len(buffered) / self._bytes_per_sec, 1),
             )
+            deadline = self._policy.reconnect_deadline(len(buffered) / self._bytes_per_sec)
             try:
                 # One deadline covers connection + replay + recognition, rather
                 # than waiting another clip-length interval after a slow replay.
-                async with asyncio.timeout(self._policy.reconnect_timeout):
+                async with asyncio.timeout(deadline):
                     replayed = await self._stt.replay(buffered)
-                    recovered = replayed and await self._transcript_within(self._policy.reconnect_timeout)
+                    recovered = replayed and await self._transcript_within(deadline)
             except Exception:  # Provider failures must not skip the backup path.
                 recovered = False
             if recovered:

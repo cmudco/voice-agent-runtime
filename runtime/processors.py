@@ -221,6 +221,7 @@ class BrowserEventProcessor(FrameProcessor):
                 "message": agent_text,
                 "content": agent_text,
                 "turnId": self._agent_turn_id,
+                "timeInCallSecs": self._recorder.duration_seconds(),
                 "isFinal": False,
             }
         )
@@ -621,35 +622,26 @@ def format_elapsed(seconds: int) -> str:
 
 
 class ElapsedTimestampProcessor(FrameProcessor):
-    """Prefix every context message with the elapsed exam time before each LLM call.
-
-    The aggregators store raw text, so the brain had no idea how long the exam
-    had been running and guessed. User messages are stamped with the time of the
-    request they trigger (the moment the student stopped talking, matching the
-    transcript's timeInCallSecs). Agent messages enter the context only after
-    they were spoken, so they are stamped lazily on the next request with the
-    time the request that produced them was made.
-    """
+    """Attach a separate timing note without modifying any dialogue text."""
 
     def __init__(self, recorder: SessionRecorder):
         super().__init__()
         self._recorder = recorder
-        self._agent_stamp = 0
 
     def _stamp(self, messages: list[dict]) -> list[dict]:
         now = self._recorder.duration_seconds()
-        for message in messages:
-            role = message.get("role")
-            content = message.get("content")
-            if role not in ("user", "assistant") or not isinstance(content, str):
-                continue
-            if ELAPSED_STAMP_RE.match(content):
-                continue
-            label = "user" if role == "user" else "agent"
-            secs = now if role == "user" else self._agent_stamp
-            message["content"] = f"[{format_elapsed(secs)}] ({label}) {content}"
-        self._agent_stamp = now
-        return messages
+        marker = "Runtime timing metadata (not dialogue): "
+        # Keep dialogue unmodified. Timing belongs to a separate system note,
+        # never an assistant-message example that the model may imitate.
+        result = [message for message in messages if not (
+            message.get("role") == "system" and isinstance(message.get("content"), str)
+            and message["content"].startswith(marker))]
+        timeline = [{"role": entry["role"], "elapsedSeconds": entry["timeInCallSecs"]}
+                    for entry in self._recorder.transcript]
+        result.insert(0, {"role": "system", "content": marker + json.dumps({
+            "currentElapsedSeconds": now, "recordedTranscriptTimeline": timeline,
+        }) + ". Use only for pacing. Do not speak or reproduce timing metadata."})
+        return result
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)

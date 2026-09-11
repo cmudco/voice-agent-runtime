@@ -68,7 +68,8 @@ class SessionRecorder:
     def record_exit(self, reason: str, *, completed: bool = False) -> None:
         allowed = {"manual_end", "time_limit", "route_change", "page_hidden_exit",
                    "connection_failed", "connection_disconnected", "client_ended"}
-        reason = reason if isinstance(reason, str) and reason in allowed else "client_cancelled"
+        if not isinstance(reason, str) or reason not in allowed:
+            reason = "client_ended" if completed else "client_cancelled"
         # A later teardown must never overwrite the explicit user action.
         if self.client_end_reason is None or completed:
             self.client_end_reason = reason

@@ -1,6 +1,7 @@
 """Pipecat full-duplex pipeline for the Socratic voice exam."""
 
 import asyncio
+from runtime.speech_text import SpeechTextGuard
 
 from loguru import logger
 
@@ -137,8 +138,10 @@ async def _run_transport_session(
             deadline_secs=settings.stt_liveness_deadline_secs,
             event_sink=stt_event,
             policy=SpeechRecoveryPolicy(progress_timeout=settings.stt_progress_timeout_secs,
-                                        reconnect_timeout=settings.stt_reconnect_timeout_secs),
-            fallback=WhisperClient(settings.whisper_url, settings.whisper_token)
+                                        reconnect_timeout=settings.stt_reconnect_timeout_secs,
+                                        reconnect_cap=settings.stt_reconnect_cap_secs),
+            fallback=WhisperClient(settings.whisper_url, settings.whisper_token,
+                                   language="en" if _is_english_session(context.language) else None)
             if settings.whisper_url and settings.whisper_token else None,
         )
         if settings.stt_liveness_deadline_secs > 0
@@ -297,6 +300,7 @@ async def _run_transport_session(
         RecoveryContextProcessor(recovery),
         VoiceStageTap(stage_tracker),
         llm,
+        SpeechTextGuard(),
         VoiceStageTap(stage_tracker),
         tts,
         browser_events,

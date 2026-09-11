@@ -106,3 +106,9 @@ class ExitTests(unittest.TestCase):
         recorder = SessionRecorder("test", "http://localhost")
         recorder.record_exit("untrusted arbitrary text")
         self.assertEqual(recorder.client_end_reason, "client_cancelled")
+
+    def test_unknown_reason_on_explicit_end_is_still_an_end(self):
+        recorder = SessionRecorder("test", "http://localhost")
+        recorder.record_exit("something new", completed=True)
+        self.assertTrue(recorder.was_client_ended())
+        self.assertEqual(recorder.client_end_reason, "client_ended")

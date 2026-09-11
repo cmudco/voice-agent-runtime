@@ -48,10 +48,15 @@ class VoiceStageTracker:
                              "sequence": self.sequence})
 
     async def recognition_event(self, event: str):
-        if event in {"stalled", "fallback_started", "fallback_processing"}:
+        if event in {"stalled", "fallback_started"}:
             self.recovering = True
             await self.set(VoiceStage.RECOVERING)
-        elif event in {"recovered", "fallback_recovered", "fallback_failed", "failed"}:
+        elif event == "fallback_processing":
+            # Once the backup is the provider, transcribing a turn is the
+            # normal path, not a recovery in progress.
+            self.recovering = False
+            await self.set(VoiceStage.TRANSCRIBING)
+        elif event in {"recovered", "fallback_recovered", "fallback_failed", "fallback_reverted", "failed"}:
             self.recovering = False
             await self.set(VoiceStage.THINKING if self.response_pending else VoiceStage.LISTENING)
 

@@ -40,8 +40,12 @@ loading; preload the model before enabling fallback. `WHISPER_MODEL` can be a
 local model directory to avoid a download on startup.
 
 The worker processes one request at a time with four CPU threads by default
-(`WHISPER_CPU_THREADS`). Overload returns 503 immediately. Runtime requests have
-a 30-second total deadline. The worker holds its admission slot even if an HTTP
+(`WHISPER_CPU_THREADS`). Overload returns 503 immediately; the runtime client
+retries a busy worker up to four times one second apart before surfacing the
+failure, so two students pausing at once do not cost one of them the answer.
+Runtime requests have a 30-second total deadline. The runtime pins the session
+language (`?language=en` for English sessions; auto-detect otherwise) because
+auto-detection on a short clip can invent text in the wrong language. The worker holds its admission slot even if an HTTP
 caller disconnects during native inference. Run under a process supervisor and
 resource limits; do not share the voice event loop or start one model per session.
 RAM alone does not establish concurrent transcription capacity: benchmark the
@@ -94,10 +98,16 @@ Manual voice acceptance cases:
 - Runtime regression suite: recovery, late transcript suppression, no reconnect
   after switching, active speech protection, HTTP validation, bounded buffers,
   interruption recovery and exit reasons.
-- `PYTHONPATH=. python tests/smoke_whisper.py <synthetic-mono-16k-wav>` with the
-  worker running and shared token in the environment: actual Pipecat pipeline,
-  one stubbed failed Mistral recovery, real local HTTP inference, exactly one
-  recovered transcript, and clean pipeline shutdown. A 7.7-second synthetic
+- `PYTHONPATH=. python tests/smoke_whisper.py <synthetic-mono-16k-wav> [auto|manual|direct|aggregated]`
+  with the worker running and shared token in the environment: actual Pipecat
+  pipeline, one stubbed failed Mistral recovery, real local HTTP inference, exactly
+  one recovered transcript, and clean pipeline shutdown. `aggregated` runs the
+  production user aggregator (default turn strategies, 2s stop timeout) with the
+  backup result deliberately delayed 3s, and checks that the late transcript still
+  yields exactly one LLM request containing the recovered text.
+- A manual `stt_switch` arriving while the watchdog is already inside the automatic
+  switch joins that switch instead of cancelling it; the consumer task is created
+  before any await so a cancelled switch can never leave turns queued unconsumed. A 7.7-second synthetic
   answer was recovered in roughly 2.1 seconds using tiny.en on the local Mac.
   This is a smoke test, not a production model quality or concurrency benchmark.
 - Frontend voice hook regression tests and production build.
@@ -117,8 +127,18 @@ The existing post-VAD deadline remains active for short answers.
 
 `VOICE_RUNTIME_STT_PROGRESS_TIMEOUT_SECS=12` and
 `VOICE_RUNTIME_STT_RECONNECT_TIMEOUT_SECS=12` are configurable. The latter covers
-reconnect, buffered replay and recognition together. These are initial policy
-values, not latency guarantees: event-loop scheduling and backup inference add time.
+reconnect, buffered replay and recognition together, and grows by the length of
+the replayed clip (Mistral transcribes a replay at roughly stream pace) up to
+`VOICE_RUNTIME_STT_RECONNECT_CAP_SECS=30`. These are initial policy values, not
+latency guarantees: event-loop scheduling and backup inference add time.
+
+An automatic switch is provisional. VAD can classify noise as speech, so if the
+first backup batch after an automatic switch hears no words, the runtime treats
+the stall as noise: it emits `fallback_reverted`, hands recognition back to
+Mistral (the next audio chunk lazily reconnects), and shows no "please repeat"
+error. Words in that first batch confirm the switch. A second automatic stall in
+the same session switches permanently, so a genuinely dead Mistral costs at most
+one extra cycle. Manual switches are never provisional.
 Whisper transcribes after a pause, never feeds an incomplete live monologue to the
 agent, and refuses overflowed buffers rather than silently losing the beginning.
 
@@ -134,7 +154,10 @@ up to eight seconds, accepts only a matching acknowledgement, and resolves pendi
 requests on disconnect. Failed inference remains an explicit error.
 
 Runtime stage events are sequenced: listening, transcribing, thinking,
-preparing_voice, speaking, recovering. The UI rejects stale events and retains
+preparing_voice, speaking, recovering. `recovering` covers the reconnect and the
+switch itself; once the backup is the provider, each turn's batch transcription
+is reported as `transcribing` (UI: "Recognizing your words (backup)"), because
+nothing is being recovered at that point. The UI rejects stale events and retains
 interruption/recovery precedence. `voice_stage_seen` is a best-effort post-render
 client acknowledgement; it does not establish that a human saw it or heard audio.
 

@@ -308,8 +308,9 @@ async def run_lab_webrtc_session(webrtc_connection, claims: SessionClaims, *, pr
             deadline_secs=settings.stt_liveness_deadline_secs,
             event_sink=_watchdog_event,
             policy=SpeechRecoveryPolicy(progress_timeout=settings.stt_progress_timeout_secs,
-                                        reconnect_timeout=settings.stt_reconnect_timeout_secs),
-            fallback=WhisperClient(settings.whisper_url, settings.whisper_token)
+                                        reconnect_timeout=settings.stt_reconnect_timeout_secs,
+                                        reconnect_cap=settings.stt_reconnect_cap_secs),
+            fallback=WhisperClient(settings.whisper_url, settings.whisper_token, language="en")
             if settings.whisper_url and settings.whisper_token else None,
             start_in_fallback=provider == "whisper",
         )
