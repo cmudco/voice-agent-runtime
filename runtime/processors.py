@@ -10,6 +10,8 @@ import numpy as np
 from pipecat.audio.utils import calculate_audio_volume
 from pipecat.frames.frames import (
     AggregatedTextFrame,
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     ErrorFrame,
@@ -244,7 +246,8 @@ class BrowserEventProcessor(FrameProcessor):
                     "isFinal": True,
                 }
             )
-        await self._emit({"type": "speaking", "isSpeaking": False})
+        # Text generation ending is not audio playback ending. The output
+        # transport reports BotStoppedSpeakingFrame after its audio drains.
         self._agent_parts = []
         self._agent_preview_parts = []
         self._agent_preview_context_id = None
@@ -257,6 +260,13 @@ class BrowserEventProcessor(FrameProcessor):
 
         if isinstance(frame, LLMFullResponseStartFrame):
             self._agent_expects_llm_end = True
+
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            await self._emit({"type": "speaking", "isSpeaking": True})
+
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            await self._emit({"type": "speaking", "isSpeaking": False})
+            self._recorder.health_event("agent_output_stopped")
 
         elif isinstance(frame, LLMFullResponseEndFrame):
             await self._finalize_agent_turn()
@@ -311,6 +321,7 @@ class BrowserEventProcessor(FrameProcessor):
 
         elif isinstance(frame, OutputAudioRawFrame) and not self._agent_audio_started:
             self._agent_audio_started = True
+            self._recorder.mark_agent_audio_queued()
             logger.info(
                 "Pipecat session {} AGENT_AUDIO_STARTED turn={}",
                 self._recorder.session_id,
@@ -492,9 +503,15 @@ class ClientControlProcessor(FrameProcessor):
         if isinstance(frame, InputTransportMessageFrame):
             message = frame.message if isinstance(frame.message, dict) else {}
             message_type = message.get("type")
+            if message_type == "client_exit":
+                self._recorder.record_exit(message.get("reason", "client_cancelled"))
+                return
             if message_type == "end":
                 self._client_ended = True
-                self._recorder.mark_client_ended()
+                self._recorder.record_exit(message.get("reason", "client_ended"), completed=True)
+                await self.push_frame(OutputTransportMessageUrgentFrame(message={
+                    "type": "session_end_ack", "requestId": message.get("requestId"),
+                }), FrameDirection.DOWNSTREAM)
                 await self.push_frame(
                     EndFrame(reason=message.get("reason", "client_ended")),
                     direction,
@@ -502,6 +519,10 @@ class ClientControlProcessor(FrameProcessor):
                 return
             if message_type == "cancel":
                 self._client_ended = True
+                self._recorder.record_exit(message.get("reason", "client_cancelled"))
+                await self.push_frame(OutputTransportMessageUrgentFrame(message={
+                    "type": "session_end_ack", "requestId": message.get("requestId"),
+                }), FrameDirection.DOWNSTREAM)
                 await self.push_frame(
                     CancelFrame(reason=message.get("reason", "client_cancelled")),
                     direction,

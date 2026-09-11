@@ -27,11 +27,14 @@ from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
     InputAudioRawFrame,
+    InterimTranscriptionFrame,
+    TranscriptionFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.mistral.stt import MistralSTTService
+from pipecat.utils.time import time_now_iso8601
 
 
 class _TimeoutGuardedConnection:
@@ -117,6 +120,22 @@ class ResilientMistralSTTService(MistralSTTService):
         super().__init__(*args, **kwargs)
         self._replay_lock = asyncio.Lock()
         self._session_over = False
+        self.fallback_active = False
+
+    async def activate_fallback(self):
+        self.fallback_active = True
+        async with self._replay_lock:
+            await self._disconnect()
+
+    async def publish_fallback(self, text: str):
+        if not self._session_over:
+            await super().push_frame(TranscriptionFrame(text, self._user_id, time_now_iso8601()))
+
+    async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
+        # Late upstream results must not duplicate a recovered Whisper turn.
+        if self.fallback_active and isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
+            return
+        await super().push_frame(frame, direction)
 
     async def stop(self, frame: EndFrame):
         self._session_over = True
@@ -127,6 +146,8 @@ class ResilientMistralSTTService(MistralSTTService):
         await super().cancel(frame)
 
     async def _connect(self):
+        if self.fallback_active or self._session_over:
+            return
         await super()._connect()
         if self._connection is not None and not isinstance(
             self._connection, _TimeoutGuardedConnection
@@ -138,10 +159,13 @@ class ResilientMistralSTTService(MistralSTTService):
         # service after stop() has closed the socket; the base class would
         # lazily reconnect for them, leaving an orphan Mistral session that
         # dies with 1011/timeout errors ~30s after the session ended.
-        if self._session_over:
+        if self._session_over or self.fallback_active:
             yield None
             return
         async with self._replay_lock:
+            if self._session_over or self.fallback_active:
+                yield None
+                return
             async for frame in super().run_stt(audio):
                 yield frame
 
@@ -195,7 +219,7 @@ class SttLivenessWatchdog(FrameProcessor):
     PRE_ROLL_SECS = 1.0
     # Hard cap on buffered speech awaiting a transcript. Long enough for a
     # full oral-exam answer; bounds memory and replay cost.
-    MAX_BUFFER_SECS = 45.0
+    MAX_BUFFER_SECS = 120.0
 
     def __init__(
         self,
@@ -205,6 +229,7 @@ class SttLivenessWatchdog(FrameProcessor):
         sample_rate: int,
         deadline_secs: float,
         event_sink=None,
+        fallback=None,
     ):
         super().__init__()
         self._session_id = session_id
@@ -220,9 +245,18 @@ class SttLivenessWatchdog(FrameProcessor):
         self._awaiting_transcript = False
         self._transcript_event = asyncio.Event()
         self._watch_task = None
+        self._fallback = fallback
+        self._fallback_active = False
+        self._fallback_queue = asyncio.Queue(maxsize=2)
+        self._fallback_task = None
+        self._speaking = False
+        self._overflow = False
+        self._closed = False
 
     def notify_transcript(self, *, is_final: bool) -> None:
         """Called by UserTranscriptProcessor for every interim/final."""
+        if self._fallback_active:
+            return  # A finished batch must not erase the next, live turn.
         self._transcript_event.set()
         if is_final:
             # Turn concluded successfully; buffered speech served its purpose.
@@ -235,11 +269,21 @@ class SttLivenessWatchdog(FrameProcessor):
         if isinstance(frame, InputAudioRawFrame):
             self._buffer_audio(frame.audio)
         elif isinstance(frame, VADUserStartedSpeakingFrame):
+            self._speaking = True
             self._on_turn_started()
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._speaking = False
             self._on_turn_stopped()
         elif isinstance(frame, (EndFrame, CancelFrame)):
+            self._closed = True
             await self._cancel_watch()
+            if self._fallback_task is not None:
+                await self.cancel_task(self._fallback_task)
+                self._fallback_task = None
+            self._turn_audio.clear()
+            self._pre_roll.clear()
+            while not self._fallback_queue.empty():
+                self._fallback_queue.get_nowait()
 
         await self.push_frame(frame, direction)
 
@@ -253,6 +297,7 @@ class SttLivenessWatchdog(FrameProcessor):
             max_bytes = int(self.MAX_BUFFER_SECS * self._bytes_per_sec)
             if len(self._turn_audio) > max_bytes:
                 self._turn_audio = self._turn_audio[-max_bytes:]
+                self._overflow = True
 
     def _on_turn_started(self) -> None:
         if not self._awaiting_transcript:
@@ -264,10 +309,58 @@ class SttLivenessWatchdog(FrameProcessor):
         self._transcript_event.clear()
 
     def _on_turn_stopped(self) -> None:
+        if self._fallback_active:
+            self._queue_fallback()
+            return
         if not self._awaiting_transcript or self._transcript_event.is_set():
             return
         if self._watch_task is None:
             self._watch_task = self.create_task(self._watch_turn())
+
+    def _queue_fallback(self):
+        if not self._awaiting_transcript or self._closed:
+            return
+        # Never silently treat a truncated answer as a complete answer.
+        overflow = self._overflow
+        audio = bytes(self._turn_audio)
+        self._awaiting_transcript = False
+        self._turn_audio.clear()
+        self._overflow = False
+        try:
+            self._fallback_queue.put_nowait((audio, overflow))
+        except asyncio.QueueFull:
+            self.create_task(self._fallback_error("overloaded"))
+
+    async def _fallback_error(self, reason):
+        if self._closed:
+            return
+        await self._emit_event("fallback_failed", reason=reason)
+        await self.push_frame(ErrorFrame(
+            error="Backup speech recognition could not recover this answer. Please repeat your answer.",
+            fatal=False,
+        ))
+
+    async def _consume_fallback(self):
+        while not self._closed:
+            audio, overflow = await self._fallback_queue.get()
+            if overflow:
+                await self._fallback_error("buffer_limit")
+                continue
+            try:
+                await self._emit_event("fallback_processing")
+                text = await self._fallback.transcribe(audio)
+                if self._closed:
+                    return
+                if text:
+                    await self._stt.publish_fallback(text)
+                    await self._emit_event("fallback_recovered")
+                else:
+                    await self._fallback_error("no_speech")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Do not log request bodies, student audio, or credentials.
+                await self._fallback_error("unavailable")
 
     async def _cancel_watch(self) -> None:
         if self._watch_task is not None:
@@ -301,6 +394,8 @@ class SttLivenessWatchdog(FrameProcessor):
         if await self._transcript_within(self._deadline_secs):
             return
         for attempt in range(1, self.MAX_REBUILD_ATTEMPTS + 1):
+            if self._closed or self._transcript_event.is_set():
+                return
             # Re-read each attempt: the student may keep talking into the
             # stall and that speech belongs in the replay too.
             buffered = bytes(self._turn_audio)
@@ -318,7 +413,11 @@ class SttLivenessWatchdog(FrameProcessor):
                 maxAttempts=self.MAX_REBUILD_ATTEMPTS,
                 bufferedSecs=round(len(buffered) / self._bytes_per_sec, 1),
             )
-            replayed = await self._stt.replay(buffered)
+            try:
+                async with asyncio.timeout(15):
+                    replayed = await self._stt.replay(buffered)
+            except Exception:  # Provider failures must not skip the backup path.
+                replayed = False
             # The realtime endpoint transcribes a replayed clip at roughly
             # stream pace, so the post-replay wait must scale with the clip
             # length — a fixed deadline made a good rebuilt socket look dead
@@ -335,6 +434,16 @@ class SttLivenessWatchdog(FrameProcessor):
                 )
                 await self._emit_event("recovered", attempt=attempt)
                 return
+        if self._closed or self._transcript_event.is_set():
+            return
+        if self._fallback is not None:
+            self._fallback_active = True
+            await self._stt.activate_fallback()
+            await self._emit_event("fallback_started")
+            self._fallback_task = self.create_task(self._consume_fallback())
+            if not self._speaking:
+                self._queue_fallback()
+            return
         logger.error(
             "Pipecat session {} STT still silent after {} rebuilds — "
             "surfacing error",

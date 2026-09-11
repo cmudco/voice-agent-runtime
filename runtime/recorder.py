@@ -33,6 +33,10 @@ class SessionRecorder:
             "breakdowns": [],
         }
         self._client_ended = False
+        self.client_end_reason: str | None = None
+        self.connected = False
+        self._last_user_final_at: float | None = None
+        self._last_agent_audio_at: float | None = None
         self._notified = False
         self._started_notified = False
         self._started_notification_task: asyncio.Task | None = None
@@ -47,7 +51,30 @@ class SessionRecorder:
             "timeInCallSecs": self.duration_seconds(),
         }
         self.transcript.append(entry)
+        if role == "user":
+            self._last_user_final_at = time.monotonic()
         return entry
+
+    def mark_agent_audio_queued(self) -> None:
+        self._last_agent_audio_at = time.monotonic()
+        self.health_event("agent_audio_queued")
+
+    def health_event(self, event: str) -> None:
+        health = self.metrics.setdefault("sessionHealth", {})
+        counts = health.setdefault("events", {})
+        counts[event] = counts.get(event, 0) + 1
+        logger.info("Pipecat session {} health event={}", self.session_id, event)
+
+    def record_exit(self, reason: str, *, completed: bool = False) -> None:
+        allowed = {"manual_end", "time_limit", "route_change", "page_hidden_exit",
+                   "connection_failed", "connection_disconnected", "client_ended"}
+        reason = reason if isinstance(reason, str) and reason in allowed else "client_cancelled"
+        # A later teardown must never overwrite the explicit user action.
+        if self.client_end_reason is None or completed:
+            self.client_end_reason = reason
+        if completed:
+            self.mark_client_ended()
+        self.health_event("exit_" + reason)
 
     def mark_client_ended(self) -> None:
         self._client_ended = True
@@ -124,6 +151,19 @@ class SessionRecorder:
         if self._notified:
             return
         self._notified = True
+        health = self.metrics.setdefault("sessionHealth", {})
+        health.update({
+            "connected": self.connected,
+            "userMessages": sum(t["role"] == "user" for t in self.transcript),
+            "agentMessages": sum(t["role"] == "agent" for t in self.transcript),
+            "lastTranscriptRole": self.transcript[-1]["role"] if self.transcript else None,
+            "exitReason": ended_reason,
+            # This is an output-queue measurement, NOT proof of browser playback.
+            "userFinalAfterLastAudioQueued": self._last_user_final_at is not None and (
+                self._last_agent_audio_at is None or self._last_user_final_at > self._last_agent_audio_at
+            ),
+        })
+        logger.info("Pipecat session {} health summary={}", self.session_id, health)
 
         callback_url = f"{self.backend_url}/api/voice/runtime/conversation-ended/"
         payload = {
