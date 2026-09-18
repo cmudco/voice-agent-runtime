@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import re
 import time
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import numpy as np
 from pipecat.audio.utils import calculate_audio_volume
 from pipecat.frames.frames import (
     AggregatedTextFrame,
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     ErrorFrame,
@@ -35,6 +38,7 @@ from loguru import logger
 from runtime.recorder import SessionRecorder
 from runtime.text_utils import _clean_transcript_text, _normalize_transcript_text
 from runtime.sentry import capture_browser_error
+from runtime.voice_stage import VoiceStage
 
 
 RUNTIME_DEBUG_DIR = Path("/tmp/voice-runtime-audio")
@@ -217,6 +221,7 @@ class BrowserEventProcessor(FrameProcessor):
                 "message": agent_text,
                 "content": agent_text,
                 "turnId": self._agent_turn_id,
+                "timeInCallSecs": self._recorder.duration_seconds(),
                 "isFinal": False,
             }
         )
@@ -243,7 +248,8 @@ class BrowserEventProcessor(FrameProcessor):
                     "isFinal": True,
                 }
             )
-        await self._emit({"type": "speaking", "isSpeaking": False})
+        # Text generation ending is not audio playback ending. The output
+        # transport reports BotStoppedSpeakingFrame after its audio drains.
         self._agent_parts = []
         self._agent_preview_parts = []
         self._agent_preview_context_id = None
@@ -256,6 +262,13 @@ class BrowserEventProcessor(FrameProcessor):
 
         if isinstance(frame, LLMFullResponseStartFrame):
             self._agent_expects_llm_end = True
+
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            await self._emit({"type": "speaking", "isSpeaking": True})
+
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            await self._emit({"type": "speaking", "isSpeaking": False})
+            self._recorder.health_event("agent_output_stopped")
 
         elif isinstance(frame, LLMFullResponseEndFrame):
             await self._finalize_agent_turn()
@@ -310,6 +323,7 @@ class BrowserEventProcessor(FrameProcessor):
 
         elif isinstance(frame, OutputAudioRawFrame) and not self._agent_audio_started:
             self._agent_audio_started = True
+            self._recorder.mark_agent_audio_queued()
             logger.info(
                 "Pipecat session {} AGENT_AUDIO_STARTED turn={}",
                 self._recorder.session_id,
@@ -442,10 +456,10 @@ class UserTranscriptProcessor(FrameProcessor):
             self._ensure_user_turn_id()
 
         elif isinstance(frame, InterimTranscriptionFrame):
-            # Any STT response — even empty — proves the socket is alive, so
-            # report it before the text checks (see SttLivenessWatchdog).
+            # Report recognition progress; the watchdog ignores empty or
+            # repeated interim text rather than mistaking it for recovery.
             if self._liveness_watchdog is not None:
-                self._liveness_watchdog.notify_transcript(is_final=False)
+                self._liveness_watchdog.notify_transcript(is_final=False, text=frame.text or "")
             text = _clean_transcript_text(frame.text or "")
             if text:
                 frame = replace(frame, text=text)
@@ -453,7 +467,7 @@ class UserTranscriptProcessor(FrameProcessor):
 
         elif isinstance(frame, TranscriptionFrame):
             if self._liveness_watchdog is not None:
-                self._liveness_watchdog.notify_transcript(is_final=True)
+                self._liveness_watchdog.notify_transcript(is_final=True, text=frame.text or "")
             text = _clean_transcript_text(frame.text or "")
             if text:
                 language = getattr(frame, "language", None)
@@ -477,6 +491,7 @@ class ClientControlProcessor(FrameProcessor):
         super().__init__()
         self._recorder = recorder
         self._client_ended = False
+        self._last_stage_sequence = 0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -491,9 +506,23 @@ class ClientControlProcessor(FrameProcessor):
         if isinstance(frame, InputTransportMessageFrame):
             message = frame.message if isinstance(frame.message, dict) else {}
             message_type = message.get("type")
+            if message_type == "voice_stage_seen":
+                sequence = message.get("sequence")
+                if (isinstance(message.get("voiceStage"), str)
+                    and message["voiceStage"] in {stage.value for stage in VoiceStage}
+                    and type(sequence) is int and sequence > self._last_stage_sequence):
+                    self._last_stage_sequence = sequence
+                    self._recorder.health_event("stage_seen_" + message["voiceStage"])
+                return
+            if message_type == "client_exit":
+                self._recorder.record_exit(message.get("reason", "client_cancelled"))
+                return
             if message_type == "end":
                 self._client_ended = True
-                self._recorder.mark_client_ended()
+                self._recorder.record_exit(message.get("reason", "client_ended"), completed=True)
+                await self.push_frame(OutputTransportMessageUrgentFrame(message={
+                    "type": "session_end_ack", "requestId": message.get("requestId"),
+                }), FrameDirection.DOWNSTREAM)
                 await self.push_frame(
                     EndFrame(reason=message.get("reason", "client_ended")),
                     direction,
@@ -501,6 +530,10 @@ class ClientControlProcessor(FrameProcessor):
                 return
             if message_type == "cancel":
                 self._client_ended = True
+                self._recorder.record_exit(message.get("reason", "client_cancelled"))
+                await self.push_frame(OutputTransportMessageUrgentFrame(message={
+                    "type": "session_end_ack", "requestId": message.get("requestId"),
+                }), FrameDirection.DOWNSTREAM)
                 await self.push_frame(
                     CancelFrame(reason=message.get("reason", "client_cancelled")),
                     direction,
@@ -579,3 +612,39 @@ def _preview_message_content(content) -> str:
     if len(text) <= 180:
         return text
     return f"{text[:177]}..."
+
+
+ELAPSED_STAMP_RE = re.compile(r"^\[\d+:\d{2}\] \((?:user|agent)\) ")
+
+
+def format_elapsed(seconds: int) -> str:
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+class ElapsedTimestampProcessor(FrameProcessor):
+    """Attach a separate timing note without modifying any dialogue text."""
+
+    def __init__(self, recorder: SessionRecorder):
+        super().__init__()
+        self._recorder = recorder
+
+    def _stamp(self, messages: list[dict]) -> list[dict]:
+        now = self._recorder.duration_seconds()
+        marker = "Runtime timing metadata (not dialogue): "
+        # Keep dialogue unmodified. Timing belongs to a separate system note,
+        # never an assistant-message example that the model may imitate.
+        result = [message for message in messages if not (
+            message.get("role") == "system" and isinstance(message.get("content"), str)
+            and message["content"].startswith(marker))]
+        timeline = [{"role": entry["role"], "elapsedSeconds": entry["timeInCallSecs"]}
+                    for entry in self._recorder.transcript]
+        result.insert(0, {"role": "system", "content": marker + json.dumps({
+            "currentElapsedSeconds": now, "recordedTranscriptTimeline": timeline,
+        }) + ". Use only for pacing. Do not speak or reproduce timing metadata."})
+        return result
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, LLMContextFrame):
+            frame.context.transform_messages(self._stamp)
+        await self.push_frame(frame, direction)

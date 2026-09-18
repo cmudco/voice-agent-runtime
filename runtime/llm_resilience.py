@@ -20,7 +20,7 @@ import httpx
 import sentry_sdk
 from loguru import logger
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
-from pipecat.frames.frames import Frame, LLMTextFrame
+from pipecat.frames.frames import Frame, LLMTextFrame, LLMFullResponseEndFrame
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.openai.llm import OpenAILLMService
@@ -139,6 +139,13 @@ class ResilientLLMService(OpenAILLMService):
         return _BoundedFirstChunkStream(stream, self._ttfb_deadline)
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
+        # The base service emits a response-end frame in a finally block,
+        # including on barge-in cancellation. TTS interprets it as a request
+        # to flush pending text (sometimes just one word). Let the interruption
+        # clear that text instead; a cancelled reply is not a completed reply.
+        task = asyncio.current_task()
+        if isinstance(frame, LLMFullResponseEndFrame) and task and task.cancelling():
+            return
         if isinstance(frame, LLMTextFrame):
             self._tokens_this_turn += 1
         await super().push_frame(frame, direction)

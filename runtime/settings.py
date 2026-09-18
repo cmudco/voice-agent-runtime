@@ -72,6 +72,11 @@ class RuntimeSettings:
     # socket is presumed dead and rebuilt with a replay. Healthy sessions
     # respond well under 2s; <= 0 disables the watchdog.
     stt_liveness_deadline_secs: float
+    whisper_url: str
+    whisper_token: str
+    stt_progress_timeout_secs: float
+    stt_reconnect_timeout_secs: float
+    stt_reconnect_cap_secs: float
 
 
 # Origins that must always be allowed, regardless of deployment env config.
@@ -129,6 +134,12 @@ def _resolve_cors_origins() -> list[str]:
 
 def get_settings() -> RuntimeSettings:
     internal_key = os.environ.get("DARE_INTERNAL_KEY", "")
+    whisper_url = os.environ.get("VOICE_RUNTIME_WHISPER_URL", "").strip()
+    whisper_token = os.environ.get("VOICE_RUNTIME_WHISPER_TOKEN", "")
+    if whisper_url and not whisper_token:
+        raise ValueError("VOICE_RUNTIME_WHISPER_TOKEN is required when Whisper is enabled")
+    if whisper_url and float(os.environ.get("VOICE_RUNTIME_STT_LIVENESS_DEADLINE_SECS", "4")) <= 0:
+        raise ValueError("Whisper fallback requires a positive STT liveness deadline")
     return RuntimeSettings(
         mistral_api_key=os.environ.get("MISTRAL_API_KEY", ""),
         sentry_dsn=os.environ.get("SENTRY_DSN", ""),
@@ -214,4 +225,9 @@ def get_settings() -> RuntimeSettings:
         stt_liveness_deadline_secs=float(
             os.environ.get("VOICE_RUNTIME_STT_LIVENESS_DEADLINE_SECS", "4.0")
         ),
+        whisper_url=whisper_url,
+        whisper_token=whisper_token,
+        stt_progress_timeout_secs=float(os.environ.get("VOICE_RUNTIME_STT_PROGRESS_TIMEOUT_SECS", "12")),
+        stt_reconnect_timeout_secs=float(os.environ.get("VOICE_RUNTIME_STT_RECONNECT_TIMEOUT_SECS", "12")),
+        stt_reconnect_cap_secs=float(os.environ.get("VOICE_RUNTIME_STT_RECONNECT_CAP_SECS", "30")),
     )

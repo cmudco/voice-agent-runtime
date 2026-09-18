@@ -1,0 +1,4 @@
+# Install in a separate worker environment, not the voice runtime environment.
+fastapi~=0.115.0
+uvicorn[standard]~=0.30.0
+faster-whisper==1.2.1
