@@ -70,10 +70,10 @@ async def _run_transport_session(
     transport: SmallWebRTCTransport,
     claims: SessionClaims,
     context: "SessionContext",
+    recorder: SessionRecorder,
 ) -> None:
     """Build and run the Pipecat WebRTC pipeline for one browser session."""
     tag_session(claims, context.backend_url)
-    recorder = SessionRecorder(claims.session_id, context.backend_url)
     logger.info(
         (
             "Pipecat WebRTC session {} starting with stt_target_delay_ms={}, "
@@ -211,7 +211,7 @@ async def _run_transport_session(
         settings,
     )
     if keyless:
-        logger.warning(
+        logger.info(
             "Pipecat session {} brain models skipped (no API key): {}",
             claims.session_id,
             ", ".join(keyless),
@@ -413,6 +413,13 @@ async def _run_transport_session(
         if greeting_started:
             return
         greeting_started = True
+        # Do not play audio from a cancelled/expired startup. Activation is
+        # authoritative and serialized with retry/cleanup in the backend.
+        if not await recorder.notify_backend_started():
+            recorder.record_exit('startup_failed')
+            recorder.health_event('activation_failed')
+            await task.cancel()
+            return
         # Voice the opening line. It is already seeded into the LLM context
         # above so the model stays consistent with what was spoken. The
         # transcript + browser event are emitted by BrowserEventProcessor
@@ -466,6 +473,7 @@ async def _run_transport_session(
     @transport.event_handler("on_client_disconnected")
     async def _on_disconnected(_transport, _client):
         logger.info("Pipecat client disconnected: {}", claims.session_id)
+        recorder.health_event('transport_disconnected')
         if greeting_fallback_task is not None:
             greeting_fallback_task.cancel()
         await task.cancel()
@@ -501,17 +509,28 @@ async def run_pipecat_webrtc_session(
     context: "SessionContext",
 ) -> None:
     """Build and run the WebRTC Pipecat pipeline for one browser session."""
-    transport = SmallWebRTCTransport(
-        webrtc_connection=webrtc_connection,
-        params=TransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            audio_in_sample_rate=BROWSER_INPUT_SAMPLE_RATE,
-            audio_out_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
-            audio_out_10ms_chunks=2,
-            video_in_enabled=False,
-            video_out_enabled=False,
-        ),
-    )
-
-    await _run_transport_session(transport, claims, context)
+    tag_session(claims, context.backend_url)
+    recorder = SessionRecorder(claims.session_id, context.backend_url)
+    try:
+        transport = SmallWebRTCTransport(
+            webrtc_connection=webrtc_connection,
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                audio_in_sample_rate=BROWSER_INPUT_SAMPLE_RATE,
+                audio_out_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
+                audio_out_10ms_chunks=2,
+                video_in_enabled=False,
+                video_out_enabled=False,
+            ),
+        )
+        await _run_transport_session(transport, claims, context, recorder)
+    except Exception:
+        # Initialization can fail before the runner's finally block exists.
+        logger.exception("Pipecat session {} setup/teardown failed", claims.session_id)
+        recorder.health_event('pipeline_failure')
+        await recorder.notify_backend(status='failed', ended_reason='runtime_failure')
+        try:
+            await webrtc_connection.disconnect()
+        except Exception:
+            logger.exception("Pipecat session {} transport cleanup failed", claims.session_id)

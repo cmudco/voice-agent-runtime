@@ -26,6 +26,8 @@ class SessionRecorder:
         # fetched). All callbacks for this session go back to this same backend.
         self.backend_url = backend_url.rstrip("/")
         self._started_at = time.monotonic()
+        self._created_at = self._started_at
+        self._audio_started = False
         self.transcript: list[dict] = []
         self.metrics: dict = {
             "latency": {},
@@ -51,6 +53,7 @@ class SessionRecorder:
             "timeInCallSecs": self.duration_seconds(),
         }
         self.transcript.append(entry)
+        self.health_event('transcript_' + role)
         if role == "user":
             self._last_user_final_at = time.monotonic()
         return entry
@@ -59,15 +62,30 @@ class SessionRecorder:
         self._last_agent_audio_at = time.monotonic()
         self.health_event("agent_audio_queued")
 
+    def record_input_audio(self, size: int) -> None:
+        """Audio receipt is not proof of speech; silence also produces packets."""
+        if size <= 0:
+            return
+        health = self.metrics.setdefault('sessionHealth', {})
+        if not health.get('inputAudioBytes'):
+            self.health_event('first_input_audio')
+        health['inputAudioBytes'] = health.get('inputAudioBytes', 0) + size
+        health['lastInputAudioSecs'] = round(time.monotonic() - self._created_at, 3)
+
     def health_event(self, event: str) -> None:
         health = self.metrics.setdefault("sessionHealth", {})
         counts = health.setdefault("events", {})
         counts[event] = counts.get(event, 0) + 1
+        # First/last timestamps remain bounded even for long or noisy sessions.
+        at = round(time.monotonic() - self._created_at, 3)
+        timing = health.setdefault('eventTiming', {}).setdefault(event, {'firstSecs': at})
+        timing['lastSecs'] = at
         logger.info("Pipecat session {} health event={}", self.session_id, event)
 
     def record_exit(self, reason: str, *, completed: bool = False) -> None:
         allowed = {"manual_end", "time_limit", "route_change", "page_hidden_exit",
-                   "connection_failed", "connection_disconnected", "client_ended"}
+                   "connection_failed", "connection_disconnected", "client_ended", "startup_failed",
+                   "startup_cancelled"}
         if not isinstance(reason, str) or reason not in allowed:
             reason = "client_ended" if completed else "client_cancelled"
         # A later teardown must never overwrite the explicit user action.
@@ -85,9 +103,12 @@ class SessionRecorder:
 
     def mark_runtime_started(self) -> None:
         """Notify Django that this reserved session became an actual attempt."""
+        if not self._audio_started:
+            self._audio_started = True
+            self._started_at = time.monotonic()
+            self.health_event('first_agent_audio')
         if self._started_notified or self._started_notification_task:
             return
-        self._started_at = time.monotonic()
         self._started_notification_task = asyncio.create_task(self.notify_backend_started())
 
     def set_latency_metric(self, key: str, value: float) -> None:
@@ -109,10 +130,10 @@ class SessionRecorder:
             }
         )
 
-    async def notify_backend_started(self) -> None:
+    async def notify_backend_started(self) -> bool:
         """POST the first-audio start event back to Django (idempotent)."""
         if self._started_notified:
-            return
+            return True
 
         callback_url = f"{self.backend_url}/api/voice/runtime/conversation-started/"
         headers = {"X-Internal-Key": settings.dare_internal_key}
@@ -123,15 +144,20 @@ class SessionRecorder:
                     json={"sessionId": self.session_id},
                     headers=headers,
                 )
+                if response.status_code in (404, 409):
+                    logger.info("Pipecat session {} activation rejected (stale startup)", self.session_id)
+                    return False
                 response.raise_for_status()
             self._started_notified = True
             logger.info("Pipecat session {} marked started in Django", self.session_id)
+            return True
         except Exception as exc:  # noqa: BLE001 - final callback can still complete the session
-            logger.warning(
+            logger.exception(
                 "Pipecat session {} start callback failed: {}",
                 self.session_id,
                 exc,
             )
+            return False
 
     async def wait_for_started_notification(self) -> None:
         if not self._started_notification_task:
@@ -151,7 +177,6 @@ class SessionRecorder:
         """POST the completed conversation back to Django (idempotent)."""
         if self._notified:
             return
-        self._notified = True
         health = self.metrics.setdefault("sessionHealth", {})
         health.update({
             "connected": self.connected,
@@ -159,6 +184,12 @@ class SessionRecorder:
             "agentMessages": sum(t["role"] == "agent" for t in self.transcript),
             "lastTranscriptRole": self.transcript[-1]["role"] if self.transcript else None,
             "exitReason": ended_reason,
+            "outcome": status,
+            "activity": (
+                "conversation" if any(t['role'] == 'user' for t in self.transcript)
+                else "greeting_only" if self.transcript
+                else "connected_no_transcript" if self.connected else "never_connected"
+            ),
             # This is an output-queue measurement, NOT proof of browser playback.
             "userFinalAfterLastAudioQueued": self._last_user_final_at is not None and (
                 self._last_agent_audio_at is None or self._last_user_final_at > self._last_agent_audio_at
@@ -188,12 +219,17 @@ class SessionRecorder:
             },
         }
         headers = {"X-Internal-Key": settings.dare_internal_key}
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(callback_url, json=payload, headers=headers)
-                response.raise_for_status()
-            logger.info("Pipecat session {} reported to Django ({})", self.session_id, status)
-        except Exception as exc:  # noqa: BLE001 - callback must never crash teardown
-            logger.warning(
-                "Pipecat session {} callback failed: {}", self.session_id, exc
-            )
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.post(callback_url, json=payload, headers=headers)
+                    response.raise_for_status()
+                logger.info("Pipecat session {} reported to Django ({})", self.session_id, status)
+                self._notified = True
+                return
+            except Exception:  # noqa: BLE001 - callback must never crash teardown
+                if attempt == 2:
+                    logger.exception("Pipecat session {} final callback failed after retries", self.session_id)
+                    return
+                self.health_event('completion_callback_retry')
+                await asyncio.sleep(attempt + 1)

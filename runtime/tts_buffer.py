@@ -40,7 +40,7 @@ class _BufferedTTSMixin:
             try:
                 self._audio_dir.mkdir(parents=True, exist_ok=True)
             except OSError as exc:  # noqa: BLE001
-                logger.warning("Could not create runtime audio dir: {}", exc)
+                logger.exception("Could not create runtime audio dir: {}", exc)
                 self._audio_dir = None
 
     async def run_tts(self, text: str, context_id: str):
@@ -106,7 +106,7 @@ class _BufferedTTSMixin:
                 wav.setframerate(sample_rate)
                 wav.writeframes(pcm_bytes)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not write runtime WAV {}: {}", path, exc)
+            logger.exception("Could not write runtime WAV {}: {}", path, exc)
 
 
 class BufferedMistralTTSService(_BufferedTTSMixin, MistralTTSService):

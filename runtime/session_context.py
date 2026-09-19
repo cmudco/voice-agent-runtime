@@ -41,6 +41,10 @@ class SessionContextError(Exception):
     """Raised when the runtime cannot fetch session context from Django."""
 
 
+class SessionContextRejected(SessionContextError):
+    """A cancelled, expired, or already claimed attempt is not a service outage."""
+
+
 # Above ~1.0 the LLM starts emitting unstable tokens that the TTS then tries to
 # voice, which QA saw as brief bursts of gibberish/other-language speech at the
 # start of turns (they were running temperature=1.4). Clamp defensively so a
@@ -84,10 +88,14 @@ async def fetch_session_context(session_id: str) -> SessionContext:
         for backend_url in backend_urls:
             url = f"{backend_url}/api/voice/runtime/sessions/{session_id}/context/"
             try:
-                response = await client.get(url, headers=headers)
+                response = await client.post(url, headers=headers)
+                # Rolling upgrade: old backends expose only GET. Enable early
+                # reservation replacement only after all runtimes use POST.
+                if response.status_code == 405:
+                    response = await client.get(url, headers=headers)
             except httpx.HTTPError as exc:
                 last_error = str(exc)
-                logger.warning(
+                logger.exception(
                     "Session context request to {} failed for {}: {}",
                     backend_url,
                     session_id,
@@ -99,11 +107,13 @@ async def fetch_session_context(session_id: str) -> SessionContext:
             if response.status_code == 404:
                 last_error = f"{backend_url} returned 404"
                 continue
+            if response.status_code == 409:
+                raise SessionContextRejected('Session startup is no longer available')
             try:
                 response.raise_for_status()
             except httpx.HTTPError as exc:
                 last_error = str(exc)
-                logger.warning(
+                logger.exception(
                     "Session context lookup at {} errored for {}: {}",
                     backend_url,
                     session_id,
@@ -113,7 +123,7 @@ async def fetch_session_context(session_id: str) -> SessionContext:
 
             return _build_context(response.json(), backend_url)
 
-    logger.warning(
+    logger.info(
         "No backend served session context for {} (tried {}): {}",
         session_id,
         backend_urls,
