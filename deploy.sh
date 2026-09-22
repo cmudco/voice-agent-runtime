@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 REPO_DIR="/home/deployer/voice-agent-service/voice-agent-runtime"  # repo is a subdirectory of where this script lives
 VENV="$REPO_DIR/.venv"
@@ -15,6 +15,9 @@ pip install --upgrade pip
 pip install -r requirements.txt
 pip install --no-deps -r requirements-pipecat.txt
 
+echo "==> Verifying backup recognition before restarting runtime"
+python -m runtime.preflight
+
 echo "==> Restarting service"
 sudo systemctl restart "$SERVICE"
 sleep 2
@@ -25,6 +28,6 @@ sudo nginx -t
 sudo systemctl reload nginx
 
 echo "==> Health check"
-curl -sf http://127.0.0.1:8010/health && echo " OK" || echo " FAILED"
+curl -sf http://127.0.0.1:8010/health
 
 echo "==> Done"

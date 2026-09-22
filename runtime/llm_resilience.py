@@ -168,7 +168,7 @@ class ResilientLLMService(OpenAILLMService):
                 reason = f"{type(exc).__name__}: {exc}"
                 self._demote(candidate)
                 nxt = order[attempt] if attempt < len(order) else None
-                logger.warning(
+                logger.exception(
                     "Pipecat session {} brain {} failed before first token ({}) — {}",
                     self._session_id,
                     candidate.label,

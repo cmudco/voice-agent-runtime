@@ -92,7 +92,7 @@ class _TimeoutGuardedConnection:
             await asyncio.wait_for(write, timeout=self.WRITE_TIMEOUT_SECS)
         except asyncio.TimeoutError:
             self._dead = True
-            logger.warning(
+            logger.exception(
                 "Mistral socket {} blocked for {}s — declaring the connection "
                 "dead so the service reconnects",
                 op,
@@ -192,7 +192,7 @@ class ResilientMistralSTTService(MistralSTTService):
             await self._connect()
             for offset in range(0, len(audio), self.REPLAY_CHUNK_BYTES):
                 if self._connection is None or self._connection.is_closed:
-                    logger.warning(
+                    logger.info(
                         "{}: replay aborted — connection lost after {}/{} bytes",
                         self,
                         offset,
@@ -203,7 +203,7 @@ class ResilientMistralSTTService(MistralSTTService):
                     audio[offset : offset + self.REPLAY_CHUNK_BYTES]
                 )
             if self._connection is None or self._connection.is_closed:
-                logger.warning("{}: replay aborted — reconnect failed", self)
+                logger.info("{}: replay aborted — reconnect failed", self)
                 return False
             await self._connection.flush_audio()
             return True
@@ -512,7 +512,7 @@ class SttLivenessWatchdog(FrameProcessor):
         try:
             await self._event_sink({"event": event, **fields})
         except Exception as exc:  # noqa: BLE001 - telemetry must not break recovery
-            logger.warning(
+            logger.exception(
                 "Pipecat session {} watchdog event sink failed: {}",
                 self._session_id,
                 exc,
@@ -529,7 +529,7 @@ class SttLivenessWatchdog(FrameProcessor):
             # Re-read each attempt: the student may keep talking into the
             # stall and that speech belongs in the replay too.
             buffered = bytes(self._turn_audio)
-            logger.warning(
+            logger.info(
                 "Pipecat session {} STT stalled: no transcript progress "
                 "— rebuild attempt {}/{}, replaying {:.1f}s of buffered audio",
                 self._session_id,

@@ -13,10 +13,12 @@ Start locally with:
 
 import asyncio
 import logging
+import sys
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
+from loguru import logger as structured_logger
 from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCRequest,
     SmallWebRTCRequestHandler,
@@ -26,13 +28,17 @@ from starlette.middleware.cors import CORSMiddleware
 
 from runtime.lab_pipeline import run_lab_webrtc_session
 from runtime.pipecat_pipeline import run_pipecat_webrtc_session
-from runtime.session_context import SessionContextError, fetch_session_context
+from runtime.session_context import SessionContextError, SessionContextRejected, fetch_session_context
 from runtime.sentry import init_sentry
 from runtime.session_tokens import SessionTokenError, validate_session_token
 from runtime.settings import get_settings
 from runtime.tts_buffer import RUNTIME_AUDIO_DIR
 
 logging.basicConfig(level=logging.INFO)
+# Keep exception stacks, never log stack-local tokens, prompts or audio buffers.
+structured_logger.configure(handlers=[{
+    'sink': sys.stderr, 'level': 'INFO', 'diagnose': False, 'backtrace': False,
+}])
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
@@ -67,19 +73,22 @@ def _validate_claims(session_id: str, token: str):
     try:
         claims = validate_session_token(token, settings.voice_runtime_session_secret)
     except SessionTokenError as exc:
-        logger.warning("Pipecat session token rejected: %s", exc)
+        logger.info("Pipecat session token rejected: %s", exc)
         raise HTTPException(status_code=401, detail="Invalid session token") from exc
 
     if claims.session_id != session_id:
-        logger.warning("Pipecat session id mismatch for %s", session_id)
+        logger.info("Pipecat session id mismatch for %s", session_id)
         raise HTTPException(status_code=401, detail="Session id mismatch")
 
     return claims
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "runtime": "pipecat"}
+async def health() -> dict:
+    # Configuration is not a claim that inference is healthy. Deployment must
+    # also exercise the authenticated worker and an end-to-end switch.
+    return {"status": "ok", "runtime": "pipecat",
+            "sttFallbackConfigured": bool(settings.whisper_url and settings.whisper_token)}
 
 
 @app.post("/sessions/{session_id}/webrtc/offer")
@@ -104,8 +113,11 @@ async def create_webrtc_session(
     else:
         try:
             context = await fetch_session_context(session_id)
+        except SessionContextRejected as exc:
+            logger.info("Rejected stale/duplicate voice startup %s", session_id)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except SessionContextError as exc:
-            logger.warning("Pipecat WebRTC context fetch failed for %s: %s", session_id, exc)
+            logger.exception("Pipecat WebRTC context fetch failed for %s", session_id)
             raise HTTPException(status_code=502, detail="Failed to fetch session context") from exc
 
     handler = SmallWebRTCRequestHandler(ice_servers=settings.voice_runtime_ice_servers)

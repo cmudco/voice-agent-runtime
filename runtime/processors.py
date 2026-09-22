@@ -109,7 +109,7 @@ class AudioInputDebugProcessor(FrameProcessor):
             try:
                 self._observe(frame)
             except Exception as exc:  # noqa: BLE001 - telemetry must not break the call
-                logger.warning(
+                logger.exception(
                     "Pipecat session {} inbound audio debug failed: {}",
                     self._session_id,
                     exc,
@@ -503,6 +503,9 @@ class ClientControlProcessor(FrameProcessor):
         if self._client_ended and isinstance(frame, InputAudioRawFrame):
             return
 
+        if isinstance(frame, InputAudioRawFrame):
+            self._recorder.record_input_audio(len(frame.audio))
+
         if isinstance(frame, InputTransportMessageFrame):
             message = frame.message if isinstance(frame.message, dict) else {}
             message_type = message.get("type")
@@ -560,7 +563,7 @@ class LLMInputDebugProcessor(FrameProcessor):
         try:
             self._debug_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            logger.warning("Could not create LLM debug dir for {}: {}", session_id, exc)
+            logger.exception("Could not create LLM debug dir for {}: {}", session_id, exc)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -593,7 +596,7 @@ class LLMInputDebugProcessor(FrameProcessor):
                     tail,
                 )
             except Exception as exc:  # noqa: BLE001 - debug logging must not break the call
-                logger.warning(
+                logger.exception(
                     "Could not write LLM input debug for session {} request #{}: {}",
                     self._session_id,
                     self._request_index,
