@@ -4,6 +4,7 @@
 venv/
 .venv/
 .venv-harness/
+.venv-whisper/
 tts_out/
 __pycache__/
 *.pyc
