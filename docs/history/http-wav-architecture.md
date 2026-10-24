@@ -6,7 +6,7 @@
 > (`VOICE_RUNTIME_TTS_PROVIDER=kokoro`, `VOICE_RUNTIME_TTS_TRANSPORT=webrtc`);
 > the HTTP WAV path described below is now the fallback transport. The
 > batch-STT shim (`runtime/batch_stt.py`) mentioned below has been removed —
-> STT is Voxtral realtime. See `README.md` for the current pipeline.
+> STT is Voxtral realtime. See [../architecture.md](../architecture.md) for the current pipeline.
 
 This note documents the Mistral voice-agent path after the WebRTC
 audio-jitter investigation and cleanup. The key decision was:
