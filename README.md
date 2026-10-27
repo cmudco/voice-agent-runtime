@@ -76,7 +76,7 @@ handled by the Socratic Bots backend and frontend directly and do not use this r
 - **Server-side turn detection** with Silero VAD, tunable through environment variables.
 - **Streaming speech-to-text** with Mistral Voxtral realtime.
 - **STT recovery.** A liveness watchdog rebuilds a stalled STT connection and replays the buffered
-  turn. An optional self-hosted [Whisper](docs/whisper-backup.md) worker takes over if Mistral keeps
+  turn. An optional self-hosted [Whisper](docs/how-to/whisper-backup.md) worker takes over if Mistral keeps
   failing.
 - **LLM fallback chain.** The agent's model is tried first; on an error or a slow first token the next
   model in `VOICE_RUNTIME_LLM_FALLBACKS` answers the turn. Mistral, OpenAI, Anthropic and Gemini are
@@ -105,22 +105,22 @@ curl http://localhost:8010/health
 ```
 
 Then set `VOICE_RUNTIME_PUBLIC_URL=http://localhost:8010` in the Socratic Bots backend. The full
-walkthrough, including why the install is two steps, is in [QUICKSTART.md](QUICKSTART.md).
+walkthrough, including why the install is two steps, is in [docs/tutorials/quickstart.md](docs/tutorials/quickstart.md).
 
 ## Documentation
 
 | Kind | Doc | What's in it |
 | --- | --- | --- |
-| Tutorial | [QUICKSTART.md](QUICKSTART.md) | Run the runtime locally and connect it to the Socratic Bots backend |
-| How-to | [DEPLOYMENT.md](DEPLOYMENT.md) | Production: systemd, reverse proxy, TURN, Whisper backup, deploy gate |
-| How-to | [docs/whisper-backup.md](docs/whisper-backup.md) | Setting up the self-hosted Whisper STT backup |
-| How-to | [docs/testing.md](docs/testing.md) | Automated tests and the manual voice acceptance checklist |
-| Reference | [docs/configuration.md](docs/configuration.md) | Every environment variable the runtime and Whisper worker read |
-| Explanation | [docs/architecture.md](docs/architecture.md) | Pipeline stages, session lifecycle, tokens, backend callbacks |
-| Explanation | [docs/history/http-wav-architecture.md](docs/history/http-wav-architecture.md) | Historical design note from the HTTP-WAV era |
-| Project | [CONTRIBUTING.md](CONTRIBUTING.md) | Issues, pull requests, checks, AI coding agents |
+| Tutorial | [docs/tutorials/quickstart.md](docs/tutorials/quickstart.md) | Run the runtime locally and connect it to the Socratic Bots backend |
+| How-to | [docs/how-to/deploy.md](docs/how-to/deploy.md) | Production: systemd, reverse proxy, TURN, Whisper backup, deploy gate |
+| How-to | [docs/how-to/whisper-backup.md](docs/how-to/whisper-backup.md) | Setting up the self-hosted Whisper STT backup |
+| How-to | [docs/how-to/testing.md](docs/how-to/testing.md) | Automated tests and the manual voice acceptance checklist |
+| Reference | [docs/reference/configuration.md](docs/reference/configuration.md) | Every environment variable the runtime and Whisper worker read |
+| Explanation | [docs/explanation/architecture.md](docs/explanation/architecture.md) | Pipeline stages, session lifecycle, tokens, backend callbacks |
+| Explanation | [docs/explanation/http-wav-architecture.md](docs/explanation/http-wav-architecture.md) | Historical design note from the HTTP-WAV era |
+| Project | [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md) | Issues, pull requests, checks, AI coding agents |
 | Project | [AGENTS.md](AGENTS.md) | Guide for AI coding agents working in this repo |
-| Project | [SECURITY.md](SECURITY.md) | Reporting vulnerabilities and hardening notes |
+| Project | [.github/SECURITY.md](.github/SECURITY.md) | Reporting vulnerabilities and hardening notes |
 | Project | [CHANGELOG.md](CHANGELOG.md) | Notable changes |
 
 ## Tech Stack

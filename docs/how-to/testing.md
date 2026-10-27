@@ -24,7 +24,7 @@ Add `-v` to see each test name. The suite runs in about ten seconds and makes no
 
 `tests/smoke_whisper.py` runs a real Pipecat pipeline against a running Whisper worker, with one
 simulated Mistral failure, and checks that exactly one recovered transcript comes out. It needs the
-worker running (see [whisper-backup.md](whisper-backup.md)), the shared token in the environment, and
+worker running (see [docs/how-to/whisper-backup.md](whisper-backup.md)), the shared token in the environment, and
 a mono 16 kHz WAV file:
 
 ```bash

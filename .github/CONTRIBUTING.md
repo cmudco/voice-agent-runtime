@@ -23,7 +23,7 @@ constraints. Leave the implementation open.
 
 ### Security issues
 
-Do not open public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
+Do not open public issues for vulnerabilities. See [.github/SECURITY.md](SECURITY.md).
 
 ---
 
@@ -42,7 +42,7 @@ Do not open public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
 
    Naming: `<author>/<feature|fix|refactor|docs>/<short-description>`.
 
-2. Run the checks (with the Python 3.12 virtualenv from [QUICKSTART.md](QUICKSTART.md) active):
+2. Run the checks (with the Python 3.12 virtualenv from [docs/tutorials/quickstart.md](../docs/tutorials/quickstart.md) active):
 
    ```bash
    python -m compileall -q runtime scripts tests
@@ -50,11 +50,11 @@ Do not open public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
    ```
 
 3. For changes to the pipeline, STT/LLM resilience or browser events, run the relevant parts of the
-   manual checklist in [docs/testing.md](docs/testing.md) with a real browser and microphone, and say
+   manual checklist in [docs/how-to/testing.md](../docs/how-to/testing.md) with a real browser and microphone, and say
    what you ran in the PR.
 
 4. If you add or change an environment variable, update `.env.example` and
-   [docs/configuration.md](docs/configuration.md) in the same PR.
+   [docs/reference/configuration.md](../docs/reference/configuration.md) in the same PR.
 
 ### What a PR should contain
 
@@ -103,13 +103,13 @@ This repository ships shared configuration for AI coding agents.
 | File | What it is |
 | --- | --- |
 | `AGENTS.md` | Project instructions: architecture, conventions, gotchas. Read by Codex and other tools that follow the `AGENTS.md` convention. |
-| `CLAUDE.md` | Imports `AGENTS.md`, plus Claude Code-specific notes. |
+| `.claude/CLAUDE.md` | Imports `AGENTS.md`, plus Claude Code-specific notes. |
 | `.agents/skills/<name>/SKILL.md` | Task procedures: `run-runtime`, `check`. |
 | `.claude/skills/<name>` | Symlinks to the above, because Claude Code scans a different path. |
 
 Invoke a skill by name (`/run-runtime` in Claude Code, `$run-runtime` in Codex) or describe the task
 and let the agent pick the skill. To change a skill, edit the file under `.agents/skills/`. See
-[`.agents/README.md`](.agents/README.md) for the layout and the Windows symlink caveat.
+[`.agents/README.md`](../.agents/README.md) for the layout and the Windows symlink caveat.
 
 Treat these files like code: if you change how the runtime is run or tested, update the matching
 skill in the same PR.

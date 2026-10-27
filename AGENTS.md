@@ -2,7 +2,7 @@
 
 Guidance for AI coding agents working in the Socratic Bots voice runtime. Codex and other tools that
 follow the `AGENTS.md` convention read this file directly; Claude Code reads it through the import in
-`CLAUDE.md`.
+`.claude/CLAUDE.md`.
 
 Task procedures (running the runtime, checking a change) live as skills in `.agents/skills/`. See
 `.agents/README.md`.
@@ -14,7 +14,7 @@ The browser connects over WebRTC; the runtime does VAD → STT → LLM → TTS a
 to the Socratic Bots backend. It has no database. The backend (separate repo,
 `cmudco/socraticbots-backend`) owns agents, permissions, session records and transcripts.
 
-Current pipeline and session flow: `docs/architecture.md`. Every setting: `docs/configuration.md`.
+Current pipeline and session flow: `docs/explanation/architecture.md`. Every setting: `docs/reference/configuration.md`.
 
 ## Commands
 
@@ -82,4 +82,4 @@ python -m runtime.preflight
 - Branch from `main` (there is no `dev`): `<author>/<feature|fix|refactor|docs>/<description>`.
 - Commits: `<type>: <summary>` (`feat`, `fix`, `refactor`, `docs`, `test`, `chore`).
 - New environment variables go in `runtime/settings.py`, `.env.example` and
-  `docs/configuration.md` together.
+  `docs/reference/configuration.md` together.

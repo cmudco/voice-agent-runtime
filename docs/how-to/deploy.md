@@ -1,6 +1,6 @@
 # Voice Agent Runtime — Deployment Guide
 
-> **Just want to run it locally?** See [QUICKSTART.md](QUICKSTART.md). This guide is for running the
+> **Just want to run it locally?** See [docs/tutorials/quickstart.md](../tutorials/quickstart.md). This guide is for running the
 > runtime on a server for real students.
 
 The runtime is a single FastAPI process (`runtime.pipecat_app:app`) on port `8010`. In production you
@@ -54,7 +54,7 @@ One runtime can serve several backends (for example staging and production). Lis
 runtime finds the backend that owns a session by asking each in turn, so every backend it serves must
 share the same `DARE_INTERNAL_KEY` and `VOICE_RUNTIME_SESSION_SECRET`.
 
-Full reference: [docs/configuration.md](docs/configuration.md).
+Full reference: [docs/reference/configuration.md](../reference/configuration.md).
 
 ## Install
 
@@ -91,7 +91,7 @@ its model is loaded, and one authenticated test transcription succeeds**:
 
 The maintainers' `deploy.sh` runs it before restarting the service, so a deployment without a working
 backup is blocked. If you do not want a backup, do not run preflight in your own deploy script. Setup
-steps for the worker are in [docs/whisper-backup.md](docs/whisper-backup.md).
+steps for the worker are in [docs/how-to/whisper-backup.md](whisper-backup.md).
 
 ## systemd
 
@@ -124,7 +124,7 @@ sudo systemctl enable --now voice-agent-runtime
 curl -sf http://127.0.0.1:8010/health
 ```
 
-The Whisper worker gets its own unit; see [docs/whisper-backup.md](docs/whisper-backup.md#run-it-under-systemd).
+The Whisper worker gets its own unit; see [docs/how-to/whisper-backup.md](whisper-backup.md#run-it-under-systemd).
 
 ## Reverse proxy (nginx)
 

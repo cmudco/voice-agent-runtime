@@ -30,7 +30,7 @@ The backend points at the runtime with `VOICE_RUNTIME_PUBLIC_URL`.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `VOICE_RUNTIME_SESSION_SECRET` | `DARE_INTERNAL_KEY` | Secret used to verify browser session tokens. |
-| `VOICE_RUNTIME_ICE_SERVERS` | `stun:stun.l.google.com:19302` | STUN/TURN URLs for WebRTC. See [DEPLOYMENT.md](../DEPLOYMENT.md#webrtc-stun-and-turn). |
+| `VOICE_RUNTIME_ICE_SERVERS` | `stun:stun.l.google.com:19302` | STUN/TURN URLs for WebRTC. See [docs/how-to/deploy.md](../how-to/deploy.md#webrtc-stun-and-turn). |
 | `VOICE_RUNTIME_CORS_ORIGINS` | empty | Extra allowed browser origins. They are added to a built-in list that always includes `http://localhost:5173`, `http://localhost:5174`, their `127.0.0.1` forms, and the maintainers' hosted frontends. |
 
 ## Speech-to-text (Mistral Voxtral)
@@ -51,7 +51,7 @@ The backend points at the runtime with `VOICE_RUNTIME_PUBLIC_URL`.
 | `VOICE_RUNTIME_WHISPER_URL` | empty | Base URL of the Whisper worker, e.g. `http://127.0.0.1:8011`. Empty disables the backup. |
 | `VOICE_RUNTIME_WHISPER_TOKEN` | empty | Bearer token shared with the worker. Required when the URL is set; startup fails without it. |
 
-See [whisper-backup.md](whisper-backup.md).
+See [docs/how-to/whisper-backup.md](../how-to/whisper-backup.md).
 
 ## LLM
 

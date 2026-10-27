@@ -63,5 +63,5 @@ lsof -ti tcp:8010 | xargs kill
 ## Related
 
 - `check` — tests before a PR.
-- `QUICKSTART.md` for the full walkthrough and troubleshooting; `docs/whisper-backup.md` for the
+- `docs/tutorials/quickstart.md` for the full walkthrough and troubleshooting; `docs/how-to/whisper-backup.md` for the
   optional STT backup worker on `:8011`.

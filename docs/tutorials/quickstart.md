@@ -1,11 +1,11 @@
 # Voice Agent Runtime — Quick Start
 
 Run the voice runtime on your machine and connect it to a local Socratic Bots backend.
-For deploying to a server, see [DEPLOYMENT.md](DEPLOYMENT.md).
+For deploying to a server, see [docs/how-to/deploy.md](../how-to/deploy.md).
 
 The runtime only handles voice. To have something to talk to, you also need DARE, the Socratic Bots
 backend and the Socratic Bots frontend running. The
-[Socratic Bots backend QUICKSTART](https://github.com/cmudco/socraticbots-backend/blob/dev/QUICKSTART.md)
+[Socratic Bots backend QUICKSTART](https://github.com/cmudco/socraticbots-backend/blob/dev/docs/tutorials/quickstart.md)
 walks through that full stack; this guide picks up at the voice step.
 
 ## Prerequisites
@@ -52,7 +52,7 @@ The defaults in `.env.example` already point at a backend on `http://localhost:8
 production speech setup (`VOICE_RUNTIME_TTS_PROVIDER=kokoro`, `VOICE_RUNTIME_TTS_TRANSPORT=webrtc`).
 Keep those two lines: the code defaults are `mistral` and `http`, an older fallback path.
 
-Every variable is described in [docs/configuration.md](docs/configuration.md).
+Every variable is described in [docs/reference/configuration.md](../reference/configuration.md).
 
 ## 3. Run
 
@@ -73,7 +73,7 @@ Expected:
 ```
 
 `sttFallbackConfigured` is `false` until you set up the optional
-[Whisper backup](docs/whisper-backup.md). You do not need it locally.
+[Whisper backup](../how-to/whisper-backup.md). You do not need it locally.
 
 ## 5. Connect the Socratic Bots backend
 
@@ -102,7 +102,7 @@ python -m unittest discover -s tests
 ```
 
 The suite uses the standard library's `unittest` and needs no extra packages. See
-[docs/testing.md](docs/testing.md) for the manual voice checklist.
+[docs/how-to/testing.md](../how-to/testing.md) for the manual voice checklist.
 
 ## Troubleshooting
 
@@ -117,4 +117,4 @@ The suite uses the standard library's `unittest` and needs no extra packages. Se
 | Session connects but the agent is silent | Confirm `VOICE_RUNTIME_TTS_PROVIDER=kokoro` and `VOICE_RUNTIME_TTS_TRANSPORT=webrtc`. The first session after install waits for the Kokoro model download; watch the runtime log. |
 | The agent never hears you | Check browser microphone permission. Leave `VOICE_RUNTIME_AUDIO_INPUT_DEBUG=true` while debugging: the log then shows input levels, so you can tell a silent track from speech below the VAD gate (`VOICE_RUNTIME_VAD_MIN_VOLUME`). |
 | Startup fails with `VOICE_RUNTIME_WHISPER_TOKEN is required when Whisper is enabled` | You set `VOICE_RUNTIME_WHISPER_URL` without a token. Set both or neither. |
-| WebRTC connects on localhost but not across networks | You need a TURN server. See [DEPLOYMENT.md](DEPLOYMENT.md#webrtc-stun-and-turn). |
+| WebRTC connects on localhost but not across networks | You need a TURN server. See [docs/how-to/deploy.md](../how-to/deploy.md#webrtc-stun-and-turn). |

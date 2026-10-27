@@ -7,7 +7,7 @@ model, not the Wispr dictation product.)
 
 The backup is optional. With its two settings empty, the runtime behaves exactly as without it, and
 the backup control never appears in the frontend. How the switch works is described in
-[architecture.md](architecture.md#speech-to-text-and-recovery).
+[docs/explanation/architecture.md](../explanation/architecture.md#speech-to-text-and-recovery).
 
 ## How it fits together
 
