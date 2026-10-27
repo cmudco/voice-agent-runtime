@@ -109,19 +109,19 @@ walkthrough, including why the install is two steps, is in [QUICKSTART.md](QUICK
 
 ## Documentation
 
-| Doc | What's in it |
-| --- | --- |
-| [QUICKSTART.md](QUICKSTART.md) | Run the runtime locally and connect it to the Socratic Bots backend |
-| [DEPLOYMENT.md](DEPLOYMENT.md) | Production: systemd, reverse proxy, TURN, Whisper backup, deploy gate |
-| [docs/configuration.md](docs/configuration.md) | Every environment variable the runtime and Whisper worker read |
-| [docs/architecture.md](docs/architecture.md) | Pipeline stages, session lifecycle, tokens, backend callbacks |
-| [docs/whisper-backup.md](docs/whisper-backup.md) | Setting up the self-hosted Whisper STT backup |
-| [docs/testing.md](docs/testing.md) | Automated tests and the manual voice acceptance checklist |
-| [docs/history/http-wav-architecture.md](docs/history/http-wav-architecture.md) | Historical design note from the HTTP-WAV era |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Issues, pull requests, checks, AI coding agents |
-| [SECURITY.md](SECURITY.md) | Reporting vulnerabilities and hardening notes |
-| [CHANGELOG.md](CHANGELOG.md) | Notable changes |
-| [AGENTS.md](AGENTS.md) | Guide for AI coding agents working in this repo |
+| Kind | Doc | What's in it |
+| --- | --- | --- |
+| Tutorial | [QUICKSTART.md](QUICKSTART.md) | Run the runtime locally and connect it to the Socratic Bots backend |
+| How-to | [DEPLOYMENT.md](DEPLOYMENT.md) | Production: systemd, reverse proxy, TURN, Whisper backup, deploy gate |
+| How-to | [docs/whisper-backup.md](docs/whisper-backup.md) | Setting up the self-hosted Whisper STT backup |
+| How-to | [docs/testing.md](docs/testing.md) | Automated tests and the manual voice acceptance checklist |
+| Reference | [docs/configuration.md](docs/configuration.md) | Every environment variable the runtime and Whisper worker read |
+| Explanation | [docs/architecture.md](docs/architecture.md) | Pipeline stages, session lifecycle, tokens, backend callbacks |
+| Explanation | [docs/history/http-wav-architecture.md](docs/history/http-wav-architecture.md) | Historical design note from the HTTP-WAV era |
+| Project | [CONTRIBUTING.md](CONTRIBUTING.md) | Issues, pull requests, checks, AI coding agents |
+| Project | [AGENTS.md](AGENTS.md) | Guide for AI coding agents working in this repo |
+| Project | [SECURITY.md](SECURITY.md) | Reporting vulnerabilities and hardening notes |
+| Project | [CHANGELOG.md](CHANGELOG.md) | Notable changes |
 
 ## Tech Stack
 
