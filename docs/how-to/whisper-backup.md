@@ -1,12 +1,11 @@
 # Whisper STT backup
 
-The runtime's primary speech-to-text is Mistral Voxtral realtime. When that connection stalls and a
-rebuild does not recover it, the runtime can hand the student's turn to a self-hosted
-[faster-whisper](https://github.com/SYSTRAN/faster-whisper) worker instead. (This is OpenAI's Whisper
-model, not the Wispr dictation product.)
+Set up a self-hosted [faster-whisper](https://github.com/SYSTRAN/faster-whisper) worker that takes
+over a student's turn when Mistral Voxtral realtime, the primary speech-to-text, stalls and a rebuild
+does not recover it. (This is OpenAI's Whisper model, not the Wispr dictation product.)
 
 The backup is optional. With its two settings empty, the runtime behaves exactly as without it, and
-the backup control never appears in the frontend. How the switch works is described in
+the backup control never appears in the frontend. How the switch works is in
 [docs/explanation/architecture.md](../explanation/architecture.md#speech-to-text-and-recovery).
 
 ## How it fits together
@@ -101,12 +100,16 @@ worker.
 Only PCM16 mono 16 kHz audio is accepted. It is held in memory, never written to disk or logged, and
 the worker returns text only.
 
-## Gotchas
+## Troubleshooting
 
-| Symptom | Cause |
-| --- | --- |
-| `401 Unauthorized` although both sides hold the same token | The worker reads the token at import time. Export it into the environment (`set -a && . ./.env && set +a`) instead of prefixing the command with `VAR=… python …`. |
-| Runtime refuses to start: `VOICE_RUNTIME_WHISPER_TOKEN is required when Whisper is enabled` | URL set without a token. Set both or neither. |
-| Runtime refuses to start: `Whisper fallback requires a positive STT liveness deadline` | `VOICE_RUNTIME_STT_LIVENESS_DEADLINE_SECS` is `0` or negative. The watchdog is what triggers the switch. |
-| No backup button in the frontend | The runtime advertises the backup only when both settings are set. |
-| STT Lab returns `503` for the Whisper provider | The backup is not configured on this runtime. |
+- **`401 Unauthorized` although both sides hold the same token.** The worker reads the token at
+  import time. Export it into the environment (`set -a && . ./.env && set +a`) instead of prefixing
+  the command with `VAR=… python …`.
+- **Runtime refuses to start: `VOICE_RUNTIME_WHISPER_TOKEN is required when Whisper is enabled`.**
+  The URL is set without a token. Set both or neither.
+- **Runtime refuses to start: `Whisper fallback requires a positive STT liveness deadline`.**
+  `VOICE_RUNTIME_STT_LIVENESS_DEADLINE_SECS` is `0` or negative. The watchdog is what triggers the
+  switch.
+- **No backup button in the frontend.** The runtime advertises the backup only when both settings
+  are set.
+- **STT Lab returns `503` for the Whisper provider.** The backup is not configured on this runtime.

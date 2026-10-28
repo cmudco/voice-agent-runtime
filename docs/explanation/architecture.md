@@ -4,6 +4,25 @@ The voice runtime turns a browser microphone into a spoken conversation with a S
 agent. It is a stateless FastAPI service: the Socratic Bots backend owns agents, permissions, session
 records and transcripts; the runtime owns the live audio for the length of one session.
 
+## Overview
+
+```mermaid
+flowchart LR
+    fe["Socratic Bots frontend<br/>:5174"]
+    sb["Socratic Bots backend<br/>:8001"]
+    dare["DARE backend<br/>:8000"]
+    rt["Voice runtime<br/>:8010"]
+    mistral["Mistral API<br/>Voxtral STT + LLM"]
+    whisper["Whisper worker<br/>:8011 (optional)"]
+
+    fe -->|REST: signed session URL| sb
+    fe <-->|WebRTC audio + data channel| rt
+    rt -->|REST: session context,<br/>start/end callbacks| sb
+    sb -->|REST: accounts, files| dare
+    rt -->|HTTPS| mistral
+    rt -.->|HTTP, loopback| whisper
+```
+
 ## Components
 
 | Component | Where | Role |
@@ -115,7 +134,7 @@ its status indicator.
   VAD triggered cannot be recovered.
 
 This is a fallback for a failing STT provider. It does not help when the browser sends no audio or
-the WebRTC connection itself fails.
+when the WebRTC connection itself fails.
 
 ### LLM fallback
 
@@ -165,3 +184,11 @@ prove that the browser played audio or that the student heard it.
 Exit reasons are reported as given (`manual_end`, `time_limit`, `route_change`, `page_hidden_exit`,
 …); a missing report becomes `unknown_disconnect`, or `connection_not_established` when no
 connection succeeded. Nothing is inferred from duration.
+
+## Further reading
+
+- [docs/reference/configuration.md](../reference/configuration.md): every setting named on this page
+- [docs/how-to/whisper-backup.md](../how-to/whisper-backup.md): set up the Whisper STT backup
+- [docs/how-to/deploy.md](../how-to/deploy.md): TLS, TURN and the preflight gate in production
+- [docs/explanation/http-wav-architecture.md](http-wav-architecture.md): design note on the HTTP-WAV
+  TTS transport

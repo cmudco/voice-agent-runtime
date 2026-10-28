@@ -1,28 +1,39 @@
-# Voice Agent Runtime — Deployment Guide
+# Deploy
 
-> **Just want to run it locally?** See [docs/tutorials/quickstart.md](../tutorials/quickstart.md). This guide is for running the
-> runtime on a server for real students.
+Run the voice runtime on a server for real students: one FastAPI process behind a TLS reverse proxy,
+with a working STUN/TURN path and, optionally, the Whisper backup worker next to it.
 
-The runtime is a single FastAPI process (`runtime.pipecat_app:app`) on port `8010`. In production you
-put a reverse proxy with TLS in front of it, give WebRTC a working STUN/TURN path, and run the
-optional Whisper backup worker next to it.
-
-Hostnames below use `example.org`. Replace them with your own.
+To run it on your own machine instead, see [docs/tutorials/quickstart.md](../tutorials/quickstart.md).
+Hostnames below use `example.org`; replace them with your own.
 
 ## Prerequisites
 
-| Requirement | Notes |
-| --- | --- |
-| Linux host, Python 3.12 | Or Docker with the included `Dockerfile`. |
-| CPU and RAM | Kokoro TTS and Silero VAD run on the CPU, once per active session. Benchmark concurrent sessions on your target machine before an exam; the project does not publish a capacity figure. |
-| A Socratic Bots backend | Reachable from the runtime over HTTPS. |
-| TLS hostname for the runtime | e.g. `voice.example.org`. Browsers only allow microphone access and WebRTC signaling from secure origins. |
-| STUN/TURN | STUN is enough on open networks; most campus and corporate networks need TURN. |
-| Mistral API key | Required. OpenAI / Anthropic / Gemini keys are optional fallbacks. |
+- **Linux host with Python 3.12**, or Docker with the included `Dockerfile`.
+- **CPU and RAM.** Kokoro TTS and Silero VAD run on the CPU, once per active session. Benchmark
+  concurrent sessions on your target machine before an exam; the project does not publish a capacity
+  figure.
+- **A Socratic Bots backend** reachable from the runtime over HTTPS.
+- **A TLS hostname for the runtime**, such as `voice.example.org`. Browsers only allow microphone
+  access and WebRTC signaling from secure origins.
+- **STUN/TURN.** STUN is enough on open networks; most campus and corporate networks need TURN.
+- **A Mistral API key** (required). OpenAI, Anthropic and Gemini keys are optional fallbacks.
+
+## Production checklist
+
+- [ ] `.env` is not world-readable and is not committed.
+- [ ] `DARE_INTERNAL_KEY` (and `VOICE_RUNTIME_SESSION_SECRET`, if used) are long random values shared
+      only with the backend.
+- [ ] `VOICE_RUNTIME_TTS_PROVIDER=kokoro` and `VOICE_RUNTIME_TTS_TRANSPORT=webrtc` are set explicitly.
+- [ ] Debug switches (`VOICE_RUNTIME_LLM_INPUT_DEBUG`, `VOICE_RUNTIME_LOG_TTS_REQUEST_TEXT`) are off.
+      `VOICE_RUNTIME_LLM_INPUT_DEBUG` writes student answers to `/tmp`.
+- [ ] TURN is configured and tested from student networks.
+- [ ] The Whisper worker listens on loopback only and `runtime.preflight` passes.
+- [ ] `/health` is monitored.
+- [ ] Concurrent-session capacity was measured on this host.
 
 ## Environment
 
-Start from `.env.example`. Settings that must be right in production:
+Start from `.env.example`. These settings must be right in production:
 
 ```bash
 MISTRAL_API_KEY=...
@@ -49,14 +60,18 @@ VOICE_RUNTIME_WHISPER_TOKEN=<random secret shared with the worker>
 On the Socratic Bots backend, set `VOICE_RUNTIME_PUBLIC_URL=https://voice.example.org` and the same
 `DARE_INTERNAL_KEY` / `VOICE_RUNTIME_SESSION_SECRET`.
 
-One runtime can serve several backends (for example staging and production). List each backend in
-`SOCRATIC_BOTS_BACKEND_URLS` and each frontend in `VOICE_RUNTIME_CORS_ORIGINS`, comma-separated. The
-runtime finds the backend that owns a session by asking each in turn, so every backend it serves must
-share the same `DARE_INTERNAL_KEY` and `VOICE_RUNTIME_SESSION_SECRET`.
+One runtime can serve several backends, such as staging and production:
 
-Full reference: [docs/reference/configuration.md](../reference/configuration.md).
+- List each backend in `SOCRATIC_BOTS_BACKEND_URLS` and each frontend in
+  `VOICE_RUNTIME_CORS_ORIGINS`, comma-separated.
+- The runtime finds the backend that owns a session by asking each in turn, so every backend it
+  serves must share the same `DARE_INTERNAL_KEY` and `VOICE_RUNTIME_SESSION_SECRET`.
 
-## Install
+Every variable is in [docs/reference/configuration.md](../reference/configuration.md).
+
+## Bare metal with systemd
+
+### 1. Install
 
 ```bash
 sudo useradd --system --create-home --home-dir /srv/voice voice
@@ -70,16 +85,19 @@ python3.12 -m venv .venv
 cp .env.example .env && chmod 600 .env   # then edit
 ```
 
-Pre-download the Kokoro model so the first student does not wait for it: either start one session
-after install, or download `kokoro-v1.0.onnx` and `voices-v1.0.bin` from the
+### 2. Pre-download the Kokoro model
+
+So the first student does not wait for the download, either start one session after install, or
+download `kokoro-v1.0.onnx` and `voices-v1.0.bin` from the
 [kokoro-onnx releases](https://github.com/thewh1teagle/kokoro-onnx/releases) and point
 `KOKORO_MODEL_PATH` / `KOKORO_VOICES_PATH` at them.
 
-## Whisper backup and the preflight gate
+### 3. Set up the Whisper backup and pass the preflight gate
 
 The self-hosted Whisper worker takes over speech recognition when Mistral's realtime STT keeps
-failing. It is optional for the runtime itself: with `VOICE_RUNTIME_WHISPER_URL` and
-`VOICE_RUNTIME_WHISPER_TOKEN` empty, the runtime starts and runs without a backup.
+failing. The runtime itself does not need it: with `VOICE_RUNTIME_WHISPER_URL` and
+`VOICE_RUNTIME_WHISPER_TOKEN` empty, it starts and runs without a backup. Worker setup is in
+[docs/how-to/whisper-backup.md](whisper-backup.md).
 
 The deploy gate is stricter. `python -m runtime.preflight` **fails unless the backup is configured,
 its model is loaded, and one authenticated test transcription succeeds**:
@@ -90,10 +108,9 @@ its model is loaded, and one authenticated test transcription succeeds**:
 ```
 
 The maintainers' `deploy.sh` runs it before restarting the service, so a deployment without a working
-backup is blocked. If you do not want a backup, do not run preflight in your own deploy script. Setup
-steps for the worker are in [docs/how-to/whisper-backup.md](whisper-backup.md).
+backup is blocked. If you do not want a backup, leave preflight out of your own deploy script.
 
-## systemd
+### 4. Install the systemd unit
 
 `/etc/systemd/system/voice-agent-runtime.service`:
 
@@ -114,9 +131,13 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-The runtime loads `.env` itself, so the unit needs no `EnvironmentFile`. Run a single Uvicorn worker:
-sessions live in process memory, and the HTTP-WAV fallback serves utterance files from the process that
-created them.
+- The runtime loads `.env` itself, so the unit needs no `EnvironmentFile`.
+- Run a single Uvicorn worker. Sessions live in process memory, and the HTTP-WAV fallback serves
+  utterance files from the process that created them.
+- The Whisper worker gets its own unit; see
+  [docs/how-to/whisper-backup.md](whisper-backup.md#run-it-under-systemd).
+
+### 5. Start it
 
 ```bash
 sudo systemctl daemon-reload
@@ -124,7 +145,16 @@ sudo systemctl enable --now voice-agent-runtime
 curl -sf http://127.0.0.1:8010/health
 ```
 
-The Whisper worker gets its own unit; see [docs/how-to/whisper-backup.md](whisper-backup.md#run-it-under-systemd).
+## Docker
+
+```bash
+docker build -t voice-agent-runtime .
+docker run -d --name voice-agent-runtime --env-file .env -p 127.0.0.1:8010:8010 voice-agent-runtime
+```
+
+- WebRTC media from a container needs either host networking (`--network host`) or a TURN server,
+  because browsers cannot reach the container's private address.
+- The image does not include the Whisper worker.
 
 ## Reverse proxy (nginx)
 
@@ -148,36 +178,35 @@ server {
 }
 ```
 
-CORS is handled by the runtime (`VOICE_RUNTIME_CORS_ORIGINS`); do not add CORS headers in nginx.
+The runtime handles CORS (`VOICE_RUNTIME_CORS_ORIGINS`); do not add CORS headers in nginx.
 
 ## WebRTC, STUN and TURN
 
 After the offer/answer exchange over HTTPS, the browser and the runtime negotiate a direct media path
-with ICE. `VOICE_RUNTIME_ICE_SERVERS` is used by the runtime; the backend passes its own
-`VOICE_RUNTIME_ICE_SERVERS` to the browser, so keep the two lists the same.
+with ICE. The runtime uses its own `VOICE_RUNTIME_ICE_SERVERS`; the backend passes its
+`VOICE_RUNTIME_ICE_SERVERS` to the browser. Keep the two lists the same.
 
-- The default, `stun:stun.l.google.com:19302`, works when the runtime host has a public IP and
+- **Default STUN.** `stun:stun.l.google.com:19302` works when the runtime host has a public IP and
   students are on permissive networks.
-- Networks that block UDP or use symmetric NAT need a TURN relay. Run one (for example
+- **TURN.** Networks that block UDP or use symmetric NAT need a TURN relay. Run one (for example
   [coturn](https://github.com/coturn/coturn)) on a public host and add it to both lists, including a
   `turns:` entry on 443 for networks that only allow TLS.
-- The runtime host must allow inbound UDP on the ephemeral port range aiortc uses, or all media will
-  go through TURN.
+- **Firewall.** The runtime host must allow inbound UDP on the ephemeral port range aiortc uses, or
+  all media goes through TURN.
 
 Test from the networks your students actually use before an exam.
 
-## Docker
+## Verify
 
 ```bash
-docker build -t voice-agent-runtime .
-docker run -d --name voice-agent-runtime --env-file .env -p 127.0.0.1:8010:8010 voice-agent-runtime
+curl -sf http://127.0.0.1:8010/health
+.venv/bin/python -m runtime.preflight     # if you run the Whisper backup
 ```
 
-WebRTC media from a container needs either host networking (`--network host`) or a TURN server,
-because the container's private address is not reachable by browsers. The image does not include the
-Whisper worker.
+`/health` returns `"sttFallbackConfigured": true` only when both Whisper variables are set. Then start
+a voice session from the Socratic Bots frontend, from a network your students use.
 
-## Upgrades
+## Upgrade
 
 ```bash
 git pull
@@ -188,21 +217,19 @@ sudo systemctl restart voice-agent-runtime
 curl -sf http://127.0.0.1:8010/health
 ```
 
-Restarting ends any live sessions. Schedule restarts outside exam windows.
+- Restarting ends any live sessions. Schedule restarts outside exam windows.
+- `deploy.sh` and `.github/workflows/deploy-staging.yml` are the maintainers' own deployment scripts.
+  They assume a specific host layout, systemd unit name and SSH setup, and the workflow only runs on
+  the upstream repository. Use them as a reference and adapt them to your environment.
 
-`deploy.sh` and `.github/workflows/deploy-staging.yml` are the maintainers' own deployment scripts.
-They assume a specific host layout, systemd unit name and SSH setup, and the workflow only runs on
-the upstream repository. Use them as a reference and adapt them to your environment.
+## Troubleshooting
 
-## Production checklist
-
-- [ ] `.env` is not world-readable and is not committed.
-- [ ] `DARE_INTERNAL_KEY` (and `VOICE_RUNTIME_SESSION_SECRET`, if used) are long random values shared
-      only with the backend.
-- [ ] `VOICE_RUNTIME_TTS_PROVIDER=kokoro` and `VOICE_RUNTIME_TTS_TRANSPORT=webrtc` are set explicitly.
-- [ ] Debug switches (`VOICE_RUNTIME_LLM_INPUT_DEBUG`, `VOICE_RUNTIME_LOG_TTS_REQUEST_TEXT`) are off.
-      `VOICE_RUNTIME_LLM_INPUT_DEBUG` writes student answers to `/tmp`.
-- [ ] TURN is configured and tested from student networks.
-- [ ] The Whisper worker listens on loopback only and `runtime.preflight` passes.
-- [ ] `/health` is monitored.
-- [ ] Concurrent-session capacity was measured on this host.
+- **`runtime.preflight` fails.** The Whisper backup is not configured, its model is not loaded, or
+  the test transcription failed. Fix the worker ([whisper-backup.md](whisper-backup.md)), or leave
+  preflight out of your deploy if you run without a backup.
+- **Media connects on some networks but not others.** Add a TURN server, including a `turns:` entry
+  on 443, to both the runtime's and the backend's `VOICE_RUNTIME_ICE_SERVERS`.
+- **WebRTC fails from a Docker container.** Use `--network host` or a TURN server.
+- **The browser blocks the microphone.** Serve the runtime over HTTPS.
+- **The first session after a deploy is slow to speak.** Kokoro is downloading its model; pre-download
+  it (step 2).

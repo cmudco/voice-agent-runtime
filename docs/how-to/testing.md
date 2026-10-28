@@ -1,9 +1,12 @@
 # Testing
 
+Run the automated suite, the Whisper smoke test and the manual voice checklist before you ship a
+runtime change.
+
 ## Automated tests
 
-The suite uses the standard library's `unittest`; nothing extra needs installing beyond the runtime
-requirements. From the repository root, with the runtime virtualenv active:
+The suite uses the standard library's `unittest`, so the runtime requirements are all you need. Run
+it from the repository root with the runtime virtualenv active:
 
 ```bash
 python -m unittest discover -s tests
@@ -24,8 +27,8 @@ Add `-v` to see each test name. The suite runs in about ten seconds and makes no
 
 `tests/smoke_whisper.py` runs a real Pipecat pipeline against a running Whisper worker, with one
 simulated Mistral failure, and checks that exactly one recovered transcript comes out. It needs the
-worker running (see [docs/how-to/whisper-backup.md](whisper-backup.md)), the shared token in the environment, and
-a mono 16 kHz WAV file:
+worker running (see [docs/how-to/whisper-backup.md](whisper-backup.md)), the shared token in the
+environment, and a mono 16 kHz WAV file:
 
 ```bash
 PYTHONPATH=. python tests/smoke_whisper.py path/to/speech-16k-mono.wav [auto|manual|direct|aggregated]

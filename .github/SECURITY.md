@@ -1,15 +1,25 @@
-# Security Policy
+# Security policy
+
+Report vulnerabilities in the voice runtime privately, and harden your own deployment with the notes
+below.
 
 ## Reporting a vulnerability
 
-Please do not report security vulnerabilities through public issues, discussions or pull requests.
+Do not report security vulnerabilities through public issues, discussions or pull requests.
 
 Use GitHub's private vulnerability reporting on this repository ("Report a vulnerability" under the
-**Security** tab). If that is not available, email the project team at vks@andrew.cmu.edu with a
-description, reproduction steps and the affected version or commit.
+**Security** tab). If that is not available, email the project team at vks@andrew.cmu.edu.
 
-We will acknowledge your report, keep you informed while we investigate, and credit you in the fix
-unless you prefer otherwise.
+### What to include
+
+- A description of the issue
+- Steps to reproduce
+- The affected version or commit
+
+### What to expect
+
+We acknowledge your report, keep you informed while we investigate, and credit you in the fix unless
+you prefer otherwise.
 
 ## Scope
 

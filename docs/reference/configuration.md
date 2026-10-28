@@ -1,13 +1,15 @@
 # Configuration
 
-The runtime reads its configuration from environment variables, loaded from `.env` in the repository
-root (`runtime/settings.py`). Variables already set in the process environment win over `.env`.
-Settings are read once at startup; restart the process after changing them.
+The runtime reads its variables in `runtime/settings.py` (`LOCAL_SENTRY_DSN` in `runtime/sentry.py`),
+from the process environment or from `.env` in the repository root; copy `.env.example` to `.env` to
+start. The Whisper worker reads its own short list, in the last table.
 
-Booleans accept `1`, `true` or `yes` (case-insensitive); anything else is false. Lists are
-comma-separated.
+- **Precedence.** Variables already set in the process environment win over `.env`.
+- **Restart to apply.** Settings are read once at startup.
+- **Types.** Booleans accept `1`, `true` or `yes` (case-insensitive); anything else is false. Lists
+  are comma-separated.
 
-## Keys shared with the Socratic Bots backend
+## Values that must match across services
 
 | Variable | Must equal | Why |
 | --- | --- | --- |
@@ -17,12 +19,12 @@ comma-separated.
 
 The backend points at the runtime with `VOICE_RUNTIME_PUBLIC_URL`.
 
-## Required
+## Core
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MISTRAL_API_KEY` | empty | Mistral key for Voxtral realtime STT, Voxtral TTS and Mistral LLMs. |
-| `DARE_INTERNAL_KEY` | empty | Shared internal-service key (see above). With it empty, backend calls are rejected and, unless `VOICE_RUNTIME_SESSION_SECRET` is set, every session token is rejected. |
+| `MISTRAL_API_KEY` | **Required** | Mistral key for Voxtral realtime STT, Voxtral TTS and Mistral LLMs. |
+| `DARE_INTERNAL_KEY` | **Required** | Shared internal-service key (see above). With it empty, backend calls are rejected and, unless `VOICE_RUNTIME_SESSION_SECRET` is set, every session token is rejected. |
 | `SOCRATIC_BOTS_BACKEND_URLS` | falls back to `SOCRATIC_BOTS_BACKEND_URL`, then `http://localhost:8001` | Backends this runtime serves. For each session the runtime asks each URL in order for the session context; the first that answers owns the session and receives its callbacks. |
 
 ## Sessions, networking and CORS
@@ -78,7 +80,8 @@ See [docs/how-to/whisper-backup.md](../how-to/whisper-backup.md).
 | `MISTRAL_TTS_MODEL` | `voxtral-mini-tts-2603` | Voxtral TTS model, used when the provider is `mistral`. |
 | `MISTRAL_TTS_VOICE` | `en_paul_neutral` | Voxtral TTS voice, used when the agent has no voice of its own. |
 
-The code defaults (`mistral` + `http`) exist for older deployments. Set both variables explicitly.
+The code defaults are `mistral` + `http`, not the tested `kokoro` + `webrtc`. Set both variables
+explicitly.
 
 ## Turn detection (Silero VAD)
 
@@ -104,7 +107,7 @@ The code defaults (`mistral` + `http`) exist for older deployments. Set both var
 | --- | --- | --- |
 | `SENTRY_DSN` | empty | Production DSN. Used only when `SENTRY_ENVIRONMENT` is not `development`, `local` or `test`. |
 | `SENTRY_ENVIRONMENT` | `development` | Environment name on events. |
-| `SENTRY_TRACES_SAMPLE_RATE` | `0.1` | Trace sampling rate. |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0.1` | Trace sampling rate. Forced to `0` when `SENTRY_ENVIRONMENT` is `development`, `local` or `test`. |
 | `LOCAL_SENTRY_DSN` | empty | DSN used instead of `SENTRY_DSN` when `SENTRY_ENVIRONMENT` is `development`, `local` or `test`. Local events are stripped to metadata. |
 
 Leave both DSNs empty to disable Sentry.
@@ -115,7 +118,7 @@ Leave both DSNs empty to disable Sentry.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `VOICE_RUNTIME_WHISPER_TOKEN` | — | Required. Same value as the runtime's. Must be exported in the worker's environment before it starts. |
+| `VOICE_RUNTIME_WHISPER_TOKEN` | **Required** | Same value as the runtime's. Must be exported in the worker's environment before it starts. |
 | `WHISPER_MODEL` | `small` | faster-whisper model name (`tiny.en`, `small`, …) or a local model directory. |
 | `WHISPER_DEVICE` | `cpu` | `cpu` or `cuda`. |
 | `WHISPER_COMPUTE_TYPE` | `int8` | faster-whisper compute type. |
@@ -123,3 +126,9 @@ Leave both DSNs empty to disable Sentry.
 
 `scripts/setup_whisper_backup.sh` also honours `WHISPER_PORT` (default `8011`) when writing
 `VOICE_RUNTIME_WHISPER_URL`.
+
+## Adding a variable
+
+1. Read it in `runtime/settings.py`, with a default and a short comment for non-obvious values.
+2. Add it to `.env.example`.
+3. Add a row to the matching table in this file.
