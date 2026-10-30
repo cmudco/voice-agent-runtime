@@ -10,8 +10,8 @@ walks through that stack; this guide picks up at the voice step. To deploy to a 
 
 ## Prerequisites
 
-- **Python 3.12.** Pipecat's native audio dependencies do not install cleanly on newer versions. The
-  Docker image uses `python:3.12-slim`.
+- **Python 3.12**, or Docker on Linux (step 3, Option B). Pipecat's native audio dependencies do
+  not install cleanly on newer Python versions; the Docker image uses `python:3.12-slim`.
 - **A Mistral API key.** Used for speech-to-text (Voxtral realtime) and the default LLM. Get one at
   <https://console.mistral.ai/>.
 - **Socratic Bots backend on `:8001`.** It creates the sessions this runtime serves.
@@ -57,9 +57,27 @@ Every variable is in [docs/reference/configuration.md](../reference/configuratio
 
 ## 3. Run
 
+### Option A — local Python
+
 ```bash
 uvicorn runtime.pipecat_app:app --host 0.0.0.0 --port 8010
 ```
+
+### Option B — Docker (Linux)
+
+Skip the install in step 1; the image does it. Host networking lets WebRTC media reach the container
+and keeps `localhost:8001` in `.env` pointing at your backend. The volume keeps the Kokoro model
+between runs.
+
+```bash
+docker build -t voice-agent-runtime .
+docker run -d --name voice-agent-runtime --network host --env-file .env \
+  -v voice_kokoro:/home/voiceagent/.cache/kokoro-onnx voice-agent-runtime
+```
+
+Docker Desktop on macOS and Windows cannot carry WebRTC media into a container without a TURN
+server, so use Option A there. [docs/how-to/deploy.md](../how-to/deploy.md#docker) covers Docker
+behind TURN.
 
 ## 4. Connect the Socratic Bots backend
 

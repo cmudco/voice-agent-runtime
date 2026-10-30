@@ -1,0 +1,17 @@
+.git
+.github
+.agents
+.claude
+.env
+.env.*
+.venv/
+.venv-*/
+venv/
+**/__pycache__/
+**/*.pyc
+local-logs/
+tts_out/
+tools/
+docs/
+tests/
+.DS_Store
