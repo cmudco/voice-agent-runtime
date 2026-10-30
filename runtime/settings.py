@@ -80,7 +80,7 @@ class RuntimeSettings:
 
 
 # Origins that must always be allowed, regardless of deployment env config.
-# These are the Socratic Books frontends that embed the voice runtime; baking
+# These are the Socratic Bots frontends that embed the voice runtime; baking
 # them in keeps CORS working even if a deployment forgets to set (or sets an
 # incomplete) VOICE_RUNTIME_CORS_ORIGINS. Local Vite ports are included for dev.
 _ALWAYS_ALLOWED_CORS_ORIGINS = [
@@ -94,7 +94,7 @@ _ALWAYS_ALLOWED_CORS_ORIGINS = [
 
 
 def _resolve_backend_urls() -> list[str]:
-    """Resolve the Socratic Books backend URLs the runtime can talk to.
+    """Resolve the Socratic Bots backend URLs the runtime can talk to.
 
     A single runtime instance serves more than one environment (e.g. staging
     and prod), so ``SOCRATIC_BOTS_BACKEND_URLS`` accepts a comma-separated list.
@@ -118,7 +118,7 @@ def _resolve_cors_origins() -> list[str]:
     """Merge the env-provided CORS origins with the always-allowed defaults.
 
     Order is preserved and duplicates are dropped so the runtime always accepts
-    the Socratic Books frontends without requiring perfect env configuration.
+    the Socratic Bots frontends without requiring perfect env configuration.
     """
     env_origins = [
         origin.strip()

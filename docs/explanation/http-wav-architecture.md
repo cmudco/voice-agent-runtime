@@ -1,4 +1,7 @@
-# Mistral Pipecat Voice Runtime Architecture
+# HTTP-WAV design note
+
+Read this to learn why agent speech was once played as HTTP WAV files instead of over WebRTC, and
+how that path works today as the fallback TTS transport.
 
 > **Status: historical snapshot.** This note captures the HTTP-WAV era after
 > the WebRTC audio-jitter investigation. Since then, the tested production
@@ -6,17 +9,16 @@
 > (`VOICE_RUNTIME_TTS_PROVIDER=kokoro`, `VOICE_RUNTIME_TTS_TRANSPORT=webrtc`);
 > the HTTP WAV path described below is now the fallback transport. The
 > batch-STT shim (`runtime/batch_stt.py`) mentioned below has been removed —
-> STT is Voxtral realtime. See `README.md` for the current pipeline.
+> STT is Voxtral realtime. See [docs/explanation/architecture.md](architecture.md) for the current pipeline.
 
-This note documents the Mistral voice-agent path after the WebRTC
-audio-jitter investigation and cleanup. The key decision was:
+The key decision after the WebRTC audio-jitter investigation was:
 
 ```text
   WebRTC remains the live input/control lane.
   Audible agent speech is played from complete runtime-generated WAV files over HTTP.
 ```
 
-## Current Mental Model
+## Current mental model
 
 ```text
                          LIVE INPUT / CONTROL LANE
@@ -60,7 +62,7 @@ audio-jitter investigation and cleanup. The key decision was:
   Speakers
 ```
 
-## End-to-End Flow
+## End-to-end flow
 
 ```text
   1. User starts a Mistral voice exam in React.
@@ -147,7 +149,7 @@ audio-jitter investigation and cleanup. The key decision was:
  12. Browser plays the WAV through a normal HTMLAudioElement.
 ```
 
-## Runtime Module Split
+## Runtime module split
 
 The former 1,283-line `pipecat_pipeline.py` has been split into smaller runtime
 modules:
@@ -182,7 +184,7 @@ modules:
 The pipeline file now owns session assembly only: create STT/LLM/TTS, wire the
 processors, start the opening message, and notify Django when the task ends.
 
-## Why WebRTC Is Still Present
+## Why WebRTC is still present
 
 WebRTC is still useful for live input:
 
@@ -216,7 +218,7 @@ Chrome NetEq / RTP timing artifacts.
       -> clean playback
 ```
 
-## What Counts As One Audio File
+## What counts as one audio file
 
 One WAV file corresponds to one TTS call, not necessarily one full LLM answer.
 
@@ -233,7 +235,7 @@ One WAV file corresponds to one TTS call, not necessarily one full LLM answer.
 
 The frontend queues these files and plays them sequentially.
 
-## Current STT Flow
+## Current STT flow
 
 ```text
   WebRTC mic frames
@@ -257,12 +259,12 @@ The frontend queues these files and plays them sequentially.
   Final transcript text enters Pipecat/LLM context
 ```
 
-Important wording: this is realtime streaming STT using Mistral's Voxtral
+This is realtime streaming STT using Mistral's Voxtral
 Realtime API, not Mistral async Batch Inference. Interim transcripts are emitted
 while the student is speaking; finalization still depends on turn-end detection
 plus the realtime STT flush/LLM/TTS requests.
 
-## Latency Tuning
+## Latency tuning
 
 The exposed Mistral advanced settings are useful for V1 tuning:
 
@@ -285,7 +287,7 @@ Client framing:
   against ElevenLabs using the same exam prompt and settings.
 ```
 
-## Relevant Code Map
+## Relevant code map
 
 Line counts captured on 2026-05-22 after the cleanup split.
 
@@ -388,7 +390,7 @@ Socratic Bots frontend integration:
       React Query wrapper for the Mistral voice catalog endpoint.
 ```
 
-## Quality Verdict
+## Quality verdict
 
 The audio-output quality blocker is resolved by moving audible TTS playback to
 HTTP WAVs. The remaining V1 risks are not audio fidelity problems:

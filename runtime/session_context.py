@@ -29,7 +29,7 @@ class SessionContext:
     voice_id: str = ""
     eagerness: str = "normal"
     turn_timeout_secs: int = 7
-    # Brain model chosen for the agent in Socratic Books; empty = runtime default.
+    # Brain model chosen for the agent in Socratic Bots; empty = runtime default.
     llm_model: str = ""
     # The backend that owns this session. Resolved by probing the configured
     # backends (staging/prod share one runtime) so the later conversation
