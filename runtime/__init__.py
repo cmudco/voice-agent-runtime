@@ -1,1 +1,1 @@
-"""Socratic Books Mistral voice runtime."""
+"""Socratic Bots Mistral voice runtime."""

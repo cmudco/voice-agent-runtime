@@ -47,7 +47,7 @@ settings = get_settings()
 if init_sentry(settings):
     logger.info("Sentry enabled (environment=%s)", settings.sentry_environment)
 
-app = FastAPI(title="Socratic Books Pipecat Voice Runtime")
+app = FastAPI(title="Socratic Bots Pipecat Voice Runtime")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.voice_runtime_cors_origins,

@@ -7,7 +7,7 @@
 
 ## What is Socratic Bots?
 
-Socratic Bots (formerly SocraticBooks) lets educators build AI tutors that teach by asking questions
+Socratic Bots lets educators build AI tutors that teach by asking questions
 instead of handing out answers. Instructors set up bots with their own course material, prompts and
 access rules. Students chat with them in the browser, or talk to them out loud in voice sessions such
 as oral exams.
