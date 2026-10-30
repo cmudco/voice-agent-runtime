@@ -5,16 +5,24 @@ This guide covers issues, pull requests and the conventions this repository foll
 
 ## Filing issues
 
-- **Before you file.** Search existing issues, and check that the problem reproduces on the latest
-  `main`.
-- **Bugs.** Include your OS, Python version and browser, the steps to reproduce, expected and actual
-  behaviour, and the relevant runtime log lines. For voice problems, also give the session ID, the
-  time, the browser, and whether the Whisper backup was configured.
-- **Redact secrets and student data.** Runtime logs can contain transcript text when debug switches
-  are on.
-- **Features.** Describe the problem for students or instructors, who is affected, and any
-  constraints. Leave the implementation open.
-- **Security issues.** Do not open a public issue. Follow [SECURITY.md](SECURITY.md).
+1. **Search first.** Look through
+   [open and closed issues](https://github.com/cmudco/voice-agent-runtime/issues?q=is%3Aissue), and
+   check that the problem still happens on the latest `main`.
+2. **Pick the right repo.** Problems inside a voice call belong here. For voice bugs, give the
+   session ID, the time, the browser, and whether the Whisper backup was configured. Runtime logs
+   can contain transcript text when debug switches are on, so check them before you paste.
+3. **Open a form.** Go to
+   [Issues → New issue](https://github.com/cmudco/voice-agent-runtime/issues/new/choose) and choose
+   **Bug report**, **Feature request** or **Docs problem**. Each form asks for exactly what we need;
+   fill in every required field.
+4. **Redact.** Remove keys, tokens and student data from logs and screenshots.
+5. **Watch the issue.** If we need more detail, we ask there.
+
+Before a large change, such as a new provider, a change to the pipeline, or a change to the backend
+contract, open a feature request with a short design sketch and wait for a reply before you write
+code.
+
+Security vulnerabilities never go in an issue. Follow [SECURITY.md](SECURITY.md).
 
 ## Pull requests
 
@@ -33,7 +41,8 @@ Name branches `<author>/<feature|fix|refactor|docs>/<short-description>`.
 ### Before you open a PR
 
 1. Run the checks with the Python 3.12 virtualenv from
-   [docs/tutorials/quickstart.md](../docs/tutorials/quickstart.md) active (or run the `check` skill):
+   [docs/tutorials/quickstart.md](../docs/tutorials/quickstart.md) active (or run the `check`
+   skill):
 
    ```bash
    python -m compileall -q runtime scripts tests
@@ -59,21 +68,18 @@ are its coding rules.
 - **Settings.** Read environment variables in `runtime/settings.py`, with a default and a short
   comment for non-obvious values. Changing a default changes every deployment that relies on it, so
   call it out in the PR.
-- **Student data.** Never log transcript text, audio or tokens by default. Anything that does belongs
-  behind an explicit debug switch that defaults to off.
+- **Student data.** Never log transcript text, audio or tokens by default. Anything that does
+  belongs behind an explicit debug switch that defaults to off.
 - **Backend contract.** The session token format, the context endpoint and the start/end callbacks
-  are shared with the Socratic Bots backend. Keep changes backward compatible, or document the deploy
-  order.
+  are shared with the Socratic Bots backend. Keep changes backward compatible, or document the
+  deploy order.
 - **Tests.** Use `unittest`. Mock Mistral and other providers; tests must not make network calls.
 
 ### PR description
 
-- **What.** A one-paragraph summary.
-- **Why.** The motivation; link the issue (`Closes #123`).
-- **How.** The approach, and any non-obvious decision.
-- **Testing.** Automated tests added, and manual voice checks run.
-- **Rollout notes.** Changes that need a matching Socratic Bots backend or frontend change, or a
-  specific deploy order.
+The [pull request template](pull_request_template.md) asks for what, why, how, testing and AI
+assistance, plus a checklist. Fill in every section; write "none" where nothing applies. Add rollout
+notes if the change needs a matching Socratic Bots change or a deploy order.
 
 ### Review and merge
 
@@ -96,9 +102,9 @@ docs: document the Whisper preflight gate
 [AGENTS.md](../AGENTS.md) holds the commands and traps; Codex reads it directly and Claude Code
 imports it through `.claude/CLAUDE.md`. Task procedures live in `.agents/skills/` (`run-runtime`,
 `check`), symlinked into `.claude/skills/`. Invoke one by name (`/run-runtime` in Claude Code,
-`$run-runtime` in Codex). See [`.agents/README.md`](../.agents/README.md) for the
-layout and the Windows symlink caveat. If you change how the runtime is run or tested, update the
-matching skill in the same PR.
+`$run-runtime` in Codex). See [`.agents/README.md`](../.agents/README.md) for the layout and the
+Windows symlink caveat. If you change how the runtime is run or tested, update the matching skill in
+the same PR.
 
 ## Getting help
 
