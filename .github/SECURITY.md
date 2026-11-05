@@ -50,7 +50,6 @@ Out of scope:
 - **Debug switches.** `VOICE_RUNTIME_LLM_INPUT_DEBUG` writes student answers to `/tmp`, and
   `VOICE_RUNTIME_LOG_TTS_REQUEST_TEXT` logs agent replies. Keep both off in production.
 - **CORS.** Set `VOICE_RUNTIME_CORS_ORIGINS` to your frontend origins only. The runtime also allows
-  local development origins and the maintainers' hosted frontends from a built-in list in
-  `runtime/settings.py`; review that list for your deployment.
+  local development origins from a built-in list in `runtime/settings.py`.
 - **Transport.** Serve the runtime over HTTPS. Browsers require a secure origin for microphone access.
 - **Secrets in git.** Never commit `.env`. `.gitignore` excludes it.

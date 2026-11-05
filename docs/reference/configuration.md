@@ -33,7 +33,7 @@ The backend points at the runtime with `VOICE_RUNTIME_PUBLIC_URL`.
 | --- | --- | --- |
 | `VOICE_RUNTIME_SESSION_SECRET` | `DARE_INTERNAL_KEY` | Secret used to verify browser session tokens. |
 | `VOICE_RUNTIME_ICE_SERVERS` | `stun:stun.l.google.com:19302` | STUN/TURN URLs for WebRTC. See [docs/how-to/deploy.md](../how-to/deploy.md#webrtc-stun-and-turn). |
-| `VOICE_RUNTIME_CORS_ORIGINS` | empty | Extra allowed browser origins. They are added to a built-in list that always includes `http://localhost:5173`, `http://localhost:5174`, their `127.0.0.1` forms, and the maintainers' hosted frontends. |
+| `VOICE_RUNTIME_CORS_ORIGINS` | empty; **Required** in production | Comma-separated browser origins of your frontends. They are added to a built-in list of `http://localhost:5173`, `http://localhost:5174` and their `127.0.0.1` forms. |
 
 ## Speech-to-text (Mistral Voxtral)
 
