@@ -383,9 +383,10 @@ class UserTranscriptProcessor(FrameProcessor):
     downstream to the output transport and is serialized there.
     """
 
-    def __init__(self, recorder: SessionRecorder, liveness_watchdog=None):
+    def __init__(self, recorder: SessionRecorder, liveness_watchdog=None, push_to_talk=None):
         super().__init__()
         self._recorder = recorder
+        self._push_to_talk = push_to_talk
         # SttLivenessWatchdog sits upstream of STT so it never sees the
         # interim/final frames itself; this processor reports them to it.
         self._liveness_watchdog = liveness_watchdog
@@ -470,6 +471,8 @@ class UserTranscriptProcessor(FrameProcessor):
                 self._liveness_watchdog.notify_transcript(is_final=True, text=frame.text or "")
             text = _clean_transcript_text(frame.text or "")
             if text:
+                if self._push_to_talk is not None:
+                    self._push_to_talk.notify_final_transcript()
                 language = getattr(frame, "language", None)
                 if language:
                     logger.info(
