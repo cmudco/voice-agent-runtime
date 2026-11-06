@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
@@ -12,11 +12,15 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
+    InterimTranscriptionFrame,
+    TranscriptionFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 
 from runtime import push_to_talk as module
+from runtime.processors import UserTranscriptProcessor
 from runtime.push_to_talk import PushToTalkProcessor
+from runtime.recorder import SessionRecorder
 
 
 def control(kind):
@@ -149,3 +153,101 @@ class PushToTalkTests(unittest.IsolatedAsyncioTestCase):
         await self.send(EndFrame())
         await self.send(control("ptt_start"))
         self.assertEqual(self.kinds(UserStartedSpeakingFrame), [])
+
+
+class PushToTalkTranscriptTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.recorder = SessionRecorder.__new__(SessionRecorder)
+        self.recorder.session_id = "s"
+        self.recorder.transcript = []
+        self.recorder.metrics = {}
+        self.recorder.health_event = lambda *a, **k: None
+        self.recorder.duration_seconds = lambda: 1.0
+        self.recorder._last_user_final_at = None
+        self.p = UserTranscriptProcessor(self.recorder, push_to_talk=MagicMock())
+        self.p.push_frame = AsyncMock()
+
+    async def send(self, frame):
+        await self.p.process_frame(frame, FrameDirection.DOWNSTREAM)
+
+    def sent(self):
+        return [
+            c.args[0].message
+            for c in self.p.push_frame.call_args_list
+            if isinstance(c.args[0], OutputTransportMessageUrgentFrame)
+        ]
+
+    def interim(self, text):
+        return InterimTranscriptionFrame(text=text, user_id="u", timestamp="t")
+
+    def final(self, text):
+        return TranscriptionFrame(text=text, user_id="u", timestamp="t")
+
+    async def test_pause_keeps_one_open_bubble_without_processing(self):
+        await self.send(UserStartedSpeakingFrame())
+        await self.send(self.final("Yeah, last"))
+        await self.send(self.interim("week was fun"))
+
+        sent = self.sent()
+        self.assertEqual(len({m["turnId"] for m in sent}), 1)
+        self.assertEqual(sent[-1]["message"], "Yeah, last week was fun")
+        self.assertFalse(any(m.get("isFinal") for m in sent))
+        self.assertFalse(any(m["type"] == "processing" for m in sent))
+
+    async def test_done_closes_the_merged_answer_once(self):
+        await self.send(UserStartedSpeakingFrame())
+        await self.send(self.final("One."))
+        await self.send(self.final("Two."))
+        await self.send(UserStoppedSpeakingFrame())
+
+        sent = self.sent()
+        self.assertEqual(sent[-2]["message"], "One. Two.")
+        self.assertTrue(sent[-2]["isFinal"])
+        self.assertEqual(sent[-1], {"type": "processing", "isProcessing": True})
+        self.assertEqual([t["message"] for t in self.recorder.transcript], ["One. Two."])
+
+    async def test_ending_mid_answer_saves_every_segment(self):
+        await self.send(UserStartedSpeakingFrame())
+        await self.send(self.final("One."))
+        await self.send(self.final("Two."))
+
+        self.assertEqual([t["message"] for t in self.recorder.transcript], ["One. Two."])
+
+    async def test_late_final_joins_the_closed_answer(self):
+        await self.send(UserStartedSpeakingFrame())
+        await self.send(self.final("One."))
+        await self.send(UserStoppedSpeakingFrame())
+        await self.send(self.final("Two."))
+
+        turn_ids = {m["turnId"] for m in self.sent() if m["type"] == "transcript_update"}
+        self.assertEqual(len(turn_ids), 1)
+        self.assertEqual([t["message"] for t in self.recorder.transcript], ["One. Two."])
+
+    async def test_late_interim_does_not_reopen_the_answer(self):
+        await self.send(UserStartedSpeakingFrame())
+        await self.send(self.final("One."))
+        await self.send(UserStoppedSpeakingFrame())
+        count = len(self.sent())
+        await self.send(self.interim("stray"))
+
+        self.assertEqual(len(self.sent()), count)
+
+    async def test_final_after_done_with_no_earlier_words_still_replies(self):
+        await self.send(UserStartedSpeakingFrame())
+        await self.send(UserStoppedSpeakingFrame())
+        self.assertEqual(self.sent(), [])
+        await self.send(self.final("One."))
+
+        self.assertTrue(self.sent()[-2]["isFinal"])
+        self.assertEqual(self.sent()[-1]["type"], "processing")
+
+    async def test_next_press_starts_a_new_bubble(self):
+        await self.send(UserStartedSpeakingFrame())
+        await self.send(self.final("One."))
+        await self.send(UserStoppedSpeakingFrame())
+        await self.send(UserStartedSpeakingFrame())
+        await self.send(self.final("Two."))
+
+        turn_ids = [m["turnId"] for m in self.sent() if m["type"] == "transcript_update"]
+        self.assertEqual(len(set(turn_ids)), 2)
+        self.assertEqual([t["message"] for t in self.recorder.transcript], ["One.", "Two."])
