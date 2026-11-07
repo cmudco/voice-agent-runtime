@@ -61,6 +61,7 @@ from runtime.text_utils import (
     _resolve_first_message,
 )
 from runtime.push_to_talk import PTT_VAD_STOP_SECS, PushToTalkProcessor
+from runtime.kokoro_voices import KOKORO_VOICE_IDS, kokoro_language, resolve_kokoro_voice
 from runtime.tts_buffer import BufferedKokoroTTSService, BufferedMistralTTSService
 from runtime.vad import _build_vad_analyzer
 
@@ -78,6 +79,8 @@ async def _run_transport_session(
 ) -> None:
     """Build and run the Pipecat WebRTC pipeline for one browser session."""
     tag_session(claims, context.backend_url)
+    kokoro_voice = resolve_kokoro_voice(context.voice_id, settings.kokoro_voice)
+    recorder.metrics["kokoroVoice"] = kokoro_voice
     logger.info(
         (
             "Pipecat WebRTC session {} starting with stt_target_delay_ms={}, "
@@ -96,7 +99,7 @@ async def _run_transport_session(
         settings.mistral_llm_model,
         settings.tts_provider,
         settings.tts_transport,
-        settings.kokoro_voice,
+        kokoro_voice,
     )
 
     # Native streaming STT. Pipecat's MistralSTTService uses the official
@@ -175,8 +178,8 @@ async def _run_transport_session(
             sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
             text_transforms=[("*", _normalize_tts_text)],
             settings=KokoroTTSService.Settings(
-                voice=settings.kokoro_voice,
-                language=Language.EN,
+                voice=kokoro_voice,
+                language=kokoro_language(kokoro_voice),
             ),
             model_path=settings.kokoro_model_path or None,
             voices_path=settings.kokoro_voices_path or None,
@@ -186,8 +189,8 @@ async def _run_transport_session(
             sample_rate=KOKORO_TTS_SAMPLE_RATE,
             text_transforms=[("*", _normalize_tts_text)],
             settings=KokoroTTSService.Settings(
-                voice=settings.kokoro_voice,
-                language=Language.EN,
+                voice=kokoro_voice,
+                language=kokoro_language(kokoro_voice),
             ),
             # Point at pre-fetched model files if configured; else auto-download.
             model_path=settings.kokoro_model_path or None,
@@ -203,7 +206,11 @@ async def _run_transport_session(
             settings=MistralTTSService.Settings(
                 model=settings.mistral_tts_model,
                 # Per-agent voice if set; otherwise the env default.
-                voice=context.voice_id or settings.mistral_tts_voice,
+                voice=(
+                    context.voice_id
+                    if context.voice_id and context.voice_id not in KOKORO_VOICE_IDS
+                    else settings.mistral_tts_voice
+                ),
             ),
             output_sample_rate=AGENT_OUTPUT_SAMPLE_RATE,
             # Enables stable HTTP playback of pre-rendered agent utterances.
