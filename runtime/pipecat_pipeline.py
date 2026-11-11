@@ -20,6 +20,7 @@ from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.services.mistral.stt import MistralSTTService
 from pipecat.services.mistral.tts import MistralTTSService
 from pipecat.transcriptions.language import Language
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
@@ -59,11 +60,14 @@ from runtime.text_utils import (
     _normalize_tts_text,
     _resolve_first_message,
 )
+from runtime.push_to_talk import PTT_VAD_STOP_SECS, PushToTalkProcessor
 from runtime.tts_buffer import BufferedKokoroTTSService, BufferedMistralTTSService
 from runtime.vad import _build_vad_analyzer
 
 
 settings = get_settings()
+
+PTT_STOP_TIMEOUT_MARGIN_SECS = 10.0
 
 
 async def _run_transport_session(
@@ -255,9 +259,25 @@ async def _run_transport_session(
             {"role": "assistant", "content": first_message},
         ]
     )
-    aggregators = LLMContextAggregatorPair(
-        llm_context,
-        user_params=LLMUserAggregatorParams(
+    push_to_talk = (
+        PushToTalkProcessor(
+            max_hold_secs=settings.ptt_max_hold_secs,
+            empty_turn_secs=settings.ptt_empty_turn_secs,
+        )
+        if context.turn_mode == "push_to_talk"
+        else None
+    )
+    if push_to_talk:
+        user_params = LLMUserAggregatorParams(
+            vad_analyzer=_build_vad_analyzer(stop_secs=PTT_VAD_STOP_SECS),
+            user_turn_strategies=ExternalUserTurnStrategies(),
+            # Only a late transcript ends the turn here, so this must outlast STT
+            # recovery; the default would drop the answer of a slow replay.
+            user_turn_stop_timeout=settings.ptt_empty_turn_secs + PTT_STOP_TIMEOUT_MARGIN_SECS,
+            user_idle_timeout=float(context.turn_timeout_secs),
+        )
+    else:
+        user_params = LLMUserAggregatorParams(
             vad_analyzer=_build_vad_analyzer(context.eagerness),
             # Fallback cap for semantic-turn misses. Without this, Pipecat's
             # default 5s wait can leave the browser in a misleading "listening"
@@ -265,8 +285,8 @@ async def _run_transport_session(
             user_turn_stop_timeout=settings.user_turn_stop_timeout,
             # "Turn Timeout" — how long of silence before the agent prompts.
             user_idle_timeout=float(context.turn_timeout_secs),
-        ),
-    )
+        )
+    aggregators = LLMContextAggregatorPair(llm_context, user_params=user_params)
 
     @tts.event_handler("on_tts_request")
     async def _on_tts_request(_tts, _context_id, text):
@@ -281,7 +301,9 @@ async def _run_transport_session(
             preview,
         )
 
-    user_transcript = UserTranscriptProcessor(recorder, liveness_watchdog=stt_watchdog)
+    user_transcript = UserTranscriptProcessor(
+        recorder, liveness_watchdog=stt_watchdog, push_to_talk=push_to_talk
+    )
     recovery = TurnRecovery(recorder)
     client_control = ClientControlProcessor(recorder)
     agent_turns = AgentTurnCoordinator()
@@ -290,6 +312,7 @@ async def _run_transport_session(
     stages = [
         transport.input(),
         client_control,
+        *([push_to_talk] if push_to_talk else []),
         *([stt_watchdog] if stt_watchdog else []),
         VoiceStageTap(stage_tracker, input_side=True),
         stt,
@@ -392,6 +415,7 @@ async def _run_transport_session(
                 "ttsTransport": settings.tts_transport,
                 "sttFallbackAvailable": bool(stt_watchdog and stt_watchdog.fallback_available),
                 "sttProvider": "whisper" if stt.fallback_active else "mistral",
+                "turnMode": context.turn_mode,
             }
         )
 

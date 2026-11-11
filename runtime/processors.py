@@ -383,15 +383,19 @@ class UserTranscriptProcessor(FrameProcessor):
     downstream to the output transport and is serialized there.
     """
 
-    def __init__(self, recorder: SessionRecorder, liveness_watchdog=None):
+    def __init__(self, recorder: SessionRecorder, liveness_watchdog=None, push_to_talk=None):
         super().__init__()
         self._recorder = recorder
+        self._push_to_talk = push_to_talk
         # SttLivenessWatchdog sits upstream of STT so it never sees the
         # interim/final frames itself; this processor reports them to it.
         self._liveness_watchdog = liveness_watchdog
         self._user_turn_id = 0
         self._active_user_turn_id: int | None = None
         self._interim_logged_turn_id: int | None = None
+        self._ptt_turn_open = False
+        self._ptt_segments: list[str] = []
+        self._ptt_entry: dict | None = None
 
     def _ensure_user_turn_id(self) -> int:
         if self._active_user_turn_id is None:
@@ -449,11 +453,94 @@ class UserTranscriptProcessor(FrameProcessor):
             )
             self._active_user_turn_id = None
 
+    async def _emit_ptt_update(self, message: str, *, is_final: bool, time_in_call: float) -> None:
+        await self.push_frame(
+            OutputTransportMessageUrgentFrame(
+                message={
+                    "type": "transcript_update",
+                    "role": "user",
+                    "message": message,
+                    "content": message,
+                    "timeInCallSecs": time_in_call,
+                    "turnId": self._active_user_turn_id,
+                    "isFinal": is_final,
+                }
+            ),
+            FrameDirection.DOWNSTREAM,
+        )
+
+    async def _emit_ptt_processing(self) -> None:
+        await self.push_frame(
+            OutputTransportMessageUrgentFrame(message={"type": "processing", "isProcessing": True}),
+            FrameDirection.DOWNSTREAM,
+        )
+
+    async def _ptt_interim(self, text: str) -> None:
+        # Words landing after the student pressed Done must not reopen the answer.
+        if not self._ptt_turn_open:
+            return
+        message = _normalize_transcript_text([*self._ptt_segments, text])
+        if not message:
+            return
+        time_in_call = (
+            self._ptt_entry["timeInCallSecs"] if self._ptt_entry else self._recorder.duration_seconds()
+        )
+        await self._emit_ptt_update(message, is_final=False, time_in_call=time_in_call)
+
+    async def _ptt_final(self, text: str) -> None:
+        """STT finals mark pauses here; only the student's press ends the answer."""
+        normalized = _normalize_transcript_text([text])
+        if not normalized:
+            return
+        self._ptt_segments.append(normalized)
+        message = _normalize_transcript_text(self._ptt_segments)
+        first_segment = self._ptt_entry is None
+        if first_segment:
+            self._ptt_entry = self._recorder.add_transcript("user", message)
+        else:
+            # Kept current per segment so ending the session mid-answer still saves every word.
+            self._ptt_entry["message"] = message
+        self._ensure_user_turn_id()
+        await self._emit_ptt_update(
+            message,
+            is_final=not self._ptt_turn_open,
+            time_in_call=self._ptt_entry["timeInCallSecs"],
+        )
+        if first_segment and not self._ptt_turn_open:
+            await self._emit_ptt_processing()
+
+    async def _ptt_close_turn(self) -> None:
+        self._ptt_turn_open = False
+        if self._ptt_entry is None:
+            return
+        logger.info(
+            "Pipecat session {} user transcript FINAL turn={} chars={} segments={}",
+            self._recorder.session_id,
+            self._active_user_turn_id,
+            len(self._ptt_entry["message"]),
+            len(self._ptt_segments),
+        )
+        await self._emit_ptt_update(
+            self._ptt_entry["message"],
+            is_final=True,
+            time_in_call=self._ptt_entry["timeInCallSecs"],
+        )
+        await self._emit_ptt_processing()
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, UserStartedSpeakingFrame):
+            if self._push_to_talk is not None:
+                self._ptt_turn_open = True
+                self._ptt_segments = []
+                self._ptt_entry = None
+                self._active_user_turn_id = None
             self._ensure_user_turn_id()
+
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            if self._push_to_talk is not None:
+                await self._ptt_close_turn()
 
         elif isinstance(frame, InterimTranscriptionFrame):
             # Report recognition progress; the watchdog ignores empty or
@@ -463,13 +550,18 @@ class UserTranscriptProcessor(FrameProcessor):
             text = _clean_transcript_text(frame.text or "")
             if text:
                 frame = replace(frame, text=text)
-                await self._emit_user_transcript(text, is_final=False)
+                if self._push_to_talk is not None:
+                    await self._ptt_interim(text)
+                else:
+                    await self._emit_user_transcript(text, is_final=False)
 
         elif isinstance(frame, TranscriptionFrame):
             if self._liveness_watchdog is not None:
                 self._liveness_watchdog.notify_transcript(is_final=True, text=frame.text or "")
             text = _clean_transcript_text(frame.text or "")
             if text:
+                if self._push_to_talk is not None:
+                    self._push_to_talk.notify_final_transcript()
                 language = getattr(frame, "language", None)
                 if language:
                     logger.info(
@@ -479,7 +571,10 @@ class UserTranscriptProcessor(FrameProcessor):
                         text[:90],
                     )
                 frame = replace(frame, text=text)
-                await self._emit_user_transcript(text, is_final=True)
+                if self._push_to_talk is not None:
+                    await self._ptt_final(text)
+                else:
+                    await self._emit_user_transcript(text, is_final=True)
 
         await self.push_frame(frame, direction)
 

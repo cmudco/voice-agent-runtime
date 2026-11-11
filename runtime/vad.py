@@ -24,9 +24,12 @@ EAGERNESS_TO_STOP_SECS = {
 }
 
 
-def _build_vad_analyzer(eagerness: str = "normal") -> SileroVADAnalyzer:
-    """Build VAD with stop_secs tuned by the agent's eagerness setting."""
-    stop_secs = EAGERNESS_TO_STOP_SECS.get(eagerness, settings.vad_stop_secs)
+def _build_vad_analyzer(
+    eagerness: str = "normal", stop_secs: float | None = None
+) -> SileroVADAnalyzer:
+    """Build VAD with stop_secs tuned by the agent's eagerness unless given explicitly."""
+    if stop_secs is None:
+        stop_secs = EAGERNESS_TO_STOP_SECS.get(eagerness, settings.vad_stop_secs)
     return SileroVADAnalyzer(
         sample_rate=BROWSER_INPUT_SAMPLE_RATE,
         params=VADParams(

@@ -29,6 +29,7 @@ class SessionContext:
     voice_id: str = ""
     eagerness: str = "normal"
     turn_timeout_secs: int = 7
+    turn_mode: str = "auto"
     # Brain model chosen for the agent in Socratic Bots; empty = runtime default.
     llm_model: str = ""
     # The backend that owns this session. Resolved by probing the configured
@@ -62,6 +63,7 @@ def _build_context(data: dict, backend_url: str) -> SessionContext:
         voice_id=data.get("voice_id") or "",
         eagerness=data.get("eagerness") or "normal",
         turn_timeout_secs=int(data.get("turn_timeout_secs", 7)),
+        turn_mode="push_to_talk" if data.get("turn_mode") == "push_to_talk" else "auto",
         llm_model=str(data.get("llm_model") or "").strip(),
         backend_url=backend_url,
     )
