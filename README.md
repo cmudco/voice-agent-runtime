@@ -77,7 +77,7 @@ agents are a separate provider that the backend and frontend handle directly, wi
 
 ## Quick start
 
-You need Python 3.12, a Mistral API key, and a running Socratic Bots backend.
+You need Python 3.12 (or Docker on Linux), a Mistral API key, and a running Socratic Bots backend.
 
 ```bash
 git clone https://github.com/cmudco/voice-agent-runtime.git
@@ -88,6 +88,13 @@ pip install --no-deps -r requirements-pipecat.txt
 cp .env.example .env    # set MISTRAL_API_KEY and DARE_INTERNAL_KEY
 uvicorn runtime.pipecat_app:app --host 0.0.0.0 --port 8010
 curl http://localhost:8010/health
+```
+
+Or, on Linux, with Docker instead of the venv:
+
+```bash
+docker build -t voice-agent-runtime .
+docker run -d --network host --env-file .env -v voice_kokoro:/home/voiceagent/.cache/kokoro-onnx voice-agent-runtime
 ```
 
 The runtime is now on <http://localhost:8010>. Set `VOICE_RUNTIME_PUBLIC_URL=http://localhost:8010` in

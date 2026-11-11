@@ -11,7 +11,7 @@ Hostnames below use `example.org`; replace them with your own.
 - **Linux host with Python 3.12**, or Docker with the included `Dockerfile`.
 - **CPU and RAM.** Kokoro TTS and Silero VAD run on the CPU, once per active session. Benchmark
   concurrent sessions on your target machine before an exam; the project does not publish a capacity
-  figure.
+  figure. The [measurements below](#resource-measurements) give a starting point.
 - **A Socratic Bots backend** reachable from the runtime over HTTPS.
 - **A TLS hostname for the runtime**, such as `voice.example.org`. Browsers only allow microphone
   access and WebRTC signaling from secure origins.
@@ -147,14 +147,48 @@ curl -sf http://127.0.0.1:8010/health
 
 ## Docker
 
+The image runs the same uvicorn command as the systemd unit, as a non-root user, with a health
+check on `/health`. Use host networking on Linux, so WebRTC media reaches the container and
+`localhost` in `.env` means the host:
+
 ```bash
 docker build -t voice-agent-runtime .
-docker run -d --name voice-agent-runtime --env-file .env -p 127.0.0.1:8010:8010 voice-agent-runtime
+docker run -d --name voice-agent-runtime --restart unless-stopped \
+  --network host --env-file .env \
+  -v voice_kokoro:/home/voiceagent/.cache/kokoro-onnx \
+  voice-agent-runtime
+curl -sf http://127.0.0.1:8010/health
 ```
 
-- WebRTC media from a container needs either host networking (`--network host`) or a TURN server,
-  because browsers cannot reach the container's private address.
-- The image does not include the Whisper worker.
+- **Keep the Kokoro volume.** Kokoro downloads its 340 MB model to `~/.cache/kokoro-onnx` on first
+  use; the volume keeps it across container rebuilds. Or mount the files and set
+  `KOKORO_MODEL_PATH` / `KOKORO_VOICES_PATH`.
+- **Without host networking** (Docker Desktop on macOS or Windows, or a bridge network on a
+  server), publish only signaling with `-p 127.0.0.1:8010:8010` and relay media through TURN
+  (see [WebRTC, STUN and TURN](#webrtc-stun-and-turn)). Point `SOCRATIC_BOTS_BACKEND_URLS` at an
+  address the container can reach, such as the backend's public URL; `localhost` is the container
+  itself.
+- **`--env-file` takes values literally.** Write `KEY=value` without quotes.
+- The image does not include the Whisper worker, and `python -m runtime.preflight` runs the same
+  way inside it: `docker exec voice-agent-runtime python -m runtime.preflight`.
+
+### Resource measurements
+
+Measured with the Docker image on Docker Desktop (8-vCPU, 7.7 GB VM on an Apple M1 Pro). Treat these
+as a lower bound for planning and repeat them on your own hardware.
+
+| What | Measured |
+| --- | --- |
+| Image size | 1.8 GB, plus the 340 MB Kokoro model in its volume |
+| Idle runtime, no session | 274 MiB RAM, ~0% CPU |
+| Each Kokoro TTS instance | +570 MiB RAM; every session builds its own |
+| Kokoro synthesis speed (real-time factor, lower is faster) | 0.95 with 8 CPUs, 1.76 with 4, 3.51 with 2 |
+| CPU during synthesis | ~7.3 cores on the 8-CPU VM |
+
+A real-time factor above 1 means the tutor's speech is generated more slowly than it plays, so
+students hear gaps. On this VM, synthesis kept up with playback only with all 8 CPUs, so budget
+CPU for every session that may speak at once, and at least 1 GB of RAM per concurrent session on
+top of the idle figure.
 
 ## Reverse proxy (nginx)
 
