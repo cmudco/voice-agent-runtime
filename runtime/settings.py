@@ -81,17 +81,13 @@ class RuntimeSettings:
     stt_reconnect_cap_secs: float
 
 
-# Origins that must always be allowed, regardless of deployment env config.
-# These are the Socratic Bots frontends that embed the voice runtime; baking
-# them in keeps CORS working even if a deployment forgets to set (or sets an
-# incomplete) VOICE_RUNTIME_CORS_ORIGINS. Local Vite ports are included for dev.
-_ALWAYS_ALLOWED_CORS_ORIGINS = [
+# Built-in origins cover local Vite ports only. Every deployment lists its own
+# frontends in VOICE_RUNTIME_CORS_ORIGINS.
+_LOCAL_DEV_CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
-    "https://socraticbots-dev.hss.cmu.edu",
-    "https://socraticbots.hss.cmu.edu",
 ]
 
 
@@ -117,10 +113,9 @@ def _resolve_backend_urls() -> list[str]:
 
 
 def _resolve_cors_origins() -> list[str]:
-    """Merge the env-provided CORS origins with the always-allowed defaults.
+    """Merge the env-provided CORS origins with the local dev defaults.
 
-    Order is preserved and duplicates are dropped so the runtime always accepts
-    the Socratic Bots frontends without requiring perfect env configuration.
+    Order is preserved and duplicates are dropped.
     """
     env_origins = [
         origin.strip()
@@ -128,7 +123,7 @@ def _resolve_cors_origins() -> list[str]:
         if origin.strip()
     ]
     resolved: list[str] = []
-    for origin in [*_ALWAYS_ALLOWED_CORS_ORIGINS, *env_origins]:
+    for origin in [*_LOCAL_DEV_CORS_ORIGINS, *env_origins]:
         if origin not in resolved:
             resolved.append(origin)
     return resolved
