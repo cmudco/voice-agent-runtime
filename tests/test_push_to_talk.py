@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     EndFrame,
     InputAudioRawFrame,
     InputTransportMessageFrame,
@@ -56,12 +57,51 @@ class PushToTalkTests(unittest.IsolatedAsyncioTestCase):
     async def send(self, frame):
         await self.p.process_frame(frame, FrameDirection.DOWNSTREAM)
 
-    async def test_start_interrupts_and_opens_the_turn(self):
+    async def test_start_opens_the_mic_without_interrupting(self):
         await self.send(control("ptt_start"))
+        self.p.broadcast_interruption.assert_not_awaited()
+        self.assertEqual(self.kinds(UserStartedSpeakingFrame), [])
+        self.assertEqual(self.messages(), [{"type": "ptt_state", "capturing": True}])
+
+    async def test_speech_interrupts_and_opens_the_turn(self):
+        await self.send(control("ptt_start"))
+        await self.send(VADUserStartedSpeakingFrame())
+        await self.send(VADUserStartedSpeakingFrame())
         self.p.broadcast_interruption.assert_awaited_once()
         self.assertEqual(self.kinds(UserStartedSpeakingFrame), [UserStartedSpeakingFrame])
-        self.assertEqual(self.kinds(VADUserStartedSpeakingFrame), [])
-        self.assertEqual(self.messages(), [{"type": "ptt_state", "capturing": True}])
+
+    async def test_agent_keeps_talking_until_the_student_speaks(self):
+        await self.send(BotStartedSpeakingFrame())
+        await self.send(control("ptt_start"))
+        self.p.broadcast_interruption.assert_not_awaited()
+        await self.send(VADUserStartedSpeakingFrame())
+        self.p.broadcast_interruption.assert_awaited_once()
+
+    async def test_silent_press_over_the_agent_changes_nothing(self):
+        await self.send(BotStartedSpeakingFrame())
+        await self.send(control("ptt_start"))
+        await self.send(control("ptt_stop"))
+        await asyncio.sleep(0.05)
+        self.p.broadcast_interruption.assert_not_awaited()
+        self.assertEqual(
+            self.kinds(UserStartedSpeakingFrame, UserStoppedSpeakingFrame, VADUserStoppedSpeakingFrame),
+            [],
+        )
+        self.assertNotIn({"type": "ptt_no_speech"}, self.messages())
+        after = InputAudioRawFrame(audio=b"\x01\x02", sample_rate=16000, num_channels=1)
+        await self.send(after)
+        self.assertEqual(after.audio, bytes(2))
+
+    async def test_silent_press_after_the_agent_finished_is_a_turn(self):
+        await self.send(BotStartedSpeakingFrame())
+        await self.send(control("ptt_start"))
+        await self.send(BotStoppedSpeakingFrame())
+        await self.send(control("ptt_stop"))
+        await asyncio.sleep(0.05)
+        self.assertEqual(
+            self.kinds(UserStartedSpeakingFrame, VADUserStoppedSpeakingFrame, UserStoppedSpeakingFrame),
+            [UserStartedSpeakingFrame, VADUserStoppedSpeakingFrame, UserStoppedSpeakingFrame],
+        )
 
     async def test_stop_waits_for_the_last_speech_segment_to_close(self):
         await self.send(control("ptt_start"))
@@ -129,6 +169,7 @@ class PushToTalkTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertIn({"type": "ptt_no_speech"}, self.messages())
         await self.send(control("ptt_start"))
+        await self.send(VADUserStartedSpeakingFrame())
         self.assertEqual(len(self.kinds(UserStartedSpeakingFrame)), 2)
 
     async def test_transcript_suppresses_the_empty_notice(self):
