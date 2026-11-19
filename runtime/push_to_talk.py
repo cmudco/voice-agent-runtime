@@ -5,6 +5,7 @@ import asyncio
 from loguru import logger
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     Frame,
@@ -35,6 +36,9 @@ class PushToTalkProcessor(FrameProcessor):
     or STT while the socket keeps steady timing. VAD still runs on captured audio, so
     the liveness watchdog only arms for real speech and an empty press can't look like
     an STT failure.
+
+    Pressing Talk only opens the mic. The agent is interrupted once VAD hears the
+    student, so it keeps talking until they actually speak over it.
     """
 
     def __init__(self, *, max_hold_secs: float, empty_turn_secs: float):
@@ -45,6 +49,8 @@ class PushToTalkProcessor(FrameProcessor):
         self._in_turn = False
         self._speech_seen = False
         self._heard_final = False
+        self._turn_started = False
+        self._bot_speaking = False
         self._closed = False
         self._vad_idle = asyncio.Event()
         self._vad_idle.set()
@@ -79,11 +85,16 @@ class PushToTalkProcessor(FrameProcessor):
         elif isinstance(frame, VADUserStartedSpeakingFrame):
             self._speech_seen = True
             self._vad_idle.clear()
+            if self._capturing and not self._turn_started:
+                await self._begin_turn()
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
             self._final_arrived.clear()
             self._vad_idle.set()
         elif isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
             self._cancel_timer("_notice_task")
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
         elif isinstance(frame, (EndFrame, CancelFrame)):
             self._closed = True
             self._capturing = False
@@ -104,8 +115,7 @@ class PushToTalkProcessor(FrameProcessor):
         else:
             self._speech_seen = False
             self._heard_final = False
-            await self.broadcast_interruption()
-            await self.push_frame(UserStartedSpeakingFrame())
+            self._turn_started = False
         await self._emit({"type": "ptt_state", "capturing": True})
         self._max_hold_task = self.create_task(self._max_hold_timer())
 
@@ -116,9 +126,21 @@ class PushToTalkProcessor(FrameProcessor):
         if not auto:
             self._cancel_timer("_max_hold_task")
         await self._emit({"type": "ptt_state", "capturing": False})
+        if not self._turn_started:
+            if self._bot_speaking:
+                # Nothing was said over the agent, so it carries on as if Talk was never pressed.
+                self._in_turn = False
+                return
+            # VAD can miss a quiet voice, so an unheard press still becomes a turn.
+            await self._begin_turn()
         if auto:
             await self._emit({"type": "ptt_auto_stopped"})
         self._finish_task = self.create_task(self._finish_turn())
+
+    async def _begin_turn(self) -> None:
+        self._turn_started = True
+        await self.broadcast_interruption()
+        await self.push_frame(UserStartedSpeakingFrame())
 
     async def _finish_turn(self) -> None:
         await asyncio.sleep(STOP_TAIL_SECS)
